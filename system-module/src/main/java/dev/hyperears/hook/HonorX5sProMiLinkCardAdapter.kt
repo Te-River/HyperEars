@@ -60,9 +60,35 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
             environment = environment,
         )
         depthItem.setOnClickListener(binding::onDepthTapped)
+        applyHeadsetIcon(root)
         dumpCardImageViews(root)
         ModuleLog.debug("MiLinkUi", "bound Honor X5s Pro native depth item")
         return binding
+    }
+
+    /** Injects the transparent product icon into the card's headset/device icon slot. */
+    private fun applyHeadsetIcon(root: View) {
+        val drawable = HonorX5sHeadsetIcon.drawable(root.resources) ?: return
+        val target = HEADSET_ICON_IDS.mapNotNull { name ->
+            runCatching { root.findMiLinkView(name) as? ImageView }.getOrNull()
+        }.firstOrNull { it.drawable != null || it.parent != null }
+            ?: largestCardImageView(root)
+        if (target == null) return
+        target.setImageDrawable(drawable)
+        ModuleLog.debug("MiLinkUi", "applied Honor headset product icon")
+    }
+
+    private fun largestCardImageView(root: View): ImageView? {
+        var best: ImageView? = null
+        var bestArea = -1L
+        root.forEachImageView { view ->
+            val area = view.width.toLong() * view.height
+            if (area > bestArea && view.drawable != null) {
+                best = view
+                bestArea = area
+            }
+        }
+        return best
     }
 
     /** One-shot inventory of card ImageViews so the headset icon slot can be identified. */
@@ -161,6 +187,8 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
         "ic_headset",
         "headset_image",
         "device_image",
+        "avatar",
+        "device_img",
     )
 
     private val cardImagesDumped = java.util.concurrent.atomic.AtomicBoolean()
