@@ -81,7 +81,9 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
             environment = environment,
         ).also { binding ->
             depthLabel.setOnClickListener(binding::onDepthTapped)
-            applyHeadsetIcon(root)
+            // Layout may not be finished during bind; defer the icon injection so the fallback
+            // can measure the card's largest ImageView reliably.
+            root.post { applyHeadsetIcon(root) }
             dumpCardImageViews(root)
             ModuleLog.debug("MiLinkUi", "bound Honor X5s Pro depth accessory")
         }
@@ -155,7 +157,9 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
         var best: ImageView? = null
         var bestArea = -1L
         root.forEachImageView { view ->
-            val area = view.width.toLong() * view.height
+            val width = view.width.takeIf { it > 0 } ?: view.layoutParams?.width ?: 0
+            val height = view.height.takeIf { it > 0 } ?: view.layoutParams?.height ?: 0
+            val area = width.toLong() * height
             if (area > bestArea && view.drawable != null) {
                 best = view
                 bestArea = area
