@@ -18,6 +18,7 @@ import dev.hyperears.integration.EarbudTransportSpec
 import dev.hyperears.integration.GattTransportSpec
 import dev.hyperears.integration.L2capEndpointSpec
 import dev.hyperears.integration.RfcommEndpointSpec
+import dev.hyperears.hook.ModuleLog
 import java.io.Closeable
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
@@ -45,6 +46,11 @@ internal interface EarbudChannel : Closeable {
     suspend fun read(buffer: ByteArray): Int
 
     suspend fun write(bytes: ByteArray)
+
+    /** Routes to a named transport target; the default implementation ignores the target. */
+    suspend fun write(bytes: ByteArray, targetId: String?) {
+        write(bytes)
+    }
 }
 
 internal fun interface EarbudChannelFactory {
@@ -243,6 +249,8 @@ private class AndroidGattChannel(
     @Volatile
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
 
+    private val modeTargets = mutableMapOf<String, BluetoothGattCharacteristic>()
+
     @Volatile
     private var pendingWrite: CompletableDeferred<Unit>? = null
 
@@ -273,6 +281,8 @@ private class AndroidGattChannel(
                 return
             }
 
+            dumpServiceTable(gatt)
+
             val characteristics = if (spec.serviceUuid != null) {
                 gatt.getService(UUID.fromString(spec.serviceUuid))?.characteristics.orEmpty()
             } else {
@@ -292,6 +302,18 @@ private class AndroidGattChannel(
             }
 
             writeCharacteristic = write
+            modeTargets.clear()
+            spec.modeWriteTargets.forEach { (mode, target) ->
+                val targetCharacteristic = characteristics.resolve(
+                    uuid = UUID.fromString(target.characteristicUuid),
+                    instanceId = target.instanceId,
+                ) { it.canWrite() }
+                if (targetCharacteristic == null) {
+                    terminate(IOException("GATT mode target $mode is unavailable"))
+                    return
+                }
+                modeTargets[mode.name] = targetCharacteristic
+            }
             if (!gatt.setCharacteristicNotification(notify, true)) {
                 terminate(IOException("GATT notification registration failed"))
                 return
@@ -381,10 +403,28 @@ private class AndroidGattChannel(
     }
 
     override suspend fun write(bytes: ByteArray) {
+        val characteristic = writeCharacteristic
+            ?: error("GATT write characteristic is not ready")
+        writeInternal(bytes, characteristic)
+    }
+
+    override suspend fun write(bytes: ByteArray, targetId: String?) {
+        if (targetId == null) {
+            write(bytes)
+            return
+        }
+        val characteristic = modeTargets[targetId]
+            ?: error("GATT write target $targetId is not ready")
+        writeInternal(bytes, characteristic)
+    }
+
+    private suspend fun writeInternal(
+        bytes: ByteArray,
+        characteristic: BluetoothGattCharacteristic,
+    ) {
         require(bytes.isNotEmpty())
         writeMutex.withLock {
             val active = gatt ?: error("GATT is not connected")
-            val characteristic = writeCharacteristic ?: error("GATT write characteristic is not ready")
             val completion = CompletableDeferred<Unit>()
             pendingWrite = completion
             val started = active.writeCharacteristic(
@@ -434,6 +474,19 @@ private class AndroidGattChannel(
         } ?: firstOrNull {
             it.uuid == uuid && predicate(it)
         }
+
+    private fun dumpServiceTable(gatt: BluetoothGatt) {
+        gatt.services.forEach { service ->
+            service.characteristics.forEach { characteristic ->
+                ModuleLog.debug(
+                    "Gatt",
+                    "service=${service.uuid} characteristic=${characteristic.uuid} " +
+                        "instanceId=${characteristic.instanceId} " +
+                        "properties=0x%02X".format(characteristic.properties),
+                )
+            }
+        }
+    }
 
     private fun BluetoothGattCharacteristic.canWrite(): Boolean =
         properties and (

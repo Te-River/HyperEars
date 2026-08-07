@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.SystemClock
 import dev.hyperears.hook.ModuleLog
 import dev.hyperears.hook.maskBluetoothAddress
+import dev.hyperears.integration.AdapterControlResult
 import dev.hyperears.integration.ControlRequest
 import dev.hyperears.integration.BatterySource
 import dev.hyperears.integration.AdapterActivation
@@ -39,6 +40,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+
+/** One ordered channel frame; [targetId] is null for the classic single-target write. */
+internal data class WriteFrame(
+    val bytes: ByteArray,
+    val targetId: String?,
+)
+
+/** Projects one control result into ordered write frames; targeted frames win over classic. */
+internal fun AdapterControlResult.writeFrames(): List<WriteFrame> =
+    if (targetedCommands.isNotEmpty()) {
+        targetedCommands.map { WriteFrame(it.bytes, it.targetId) }
+    } else {
+        commands.map { WriteFrame(it, null) }
+    }
 
 /**
  * One device-scoped private-protocol session.
@@ -119,6 +134,24 @@ internal class EarbudDeviceSession(
     }
 
     /**
+     * Injects one out-of-band vendor report (HFP AT line) into the adapter's protocol decoder.
+     *
+     * Outbound commands are deliberately ignored: system-profile channels such as HFP are
+     * read-only for HyperEars and must never trigger writes on the private transport. The report
+     * is serialized with channel reads so decoder state never mutates concurrently.
+     */
+    fun onVendorReport(bytes: ByteArray) {
+        if (closed.get()) return
+        scope.launch {
+            transactionMutex.withLock {
+                if (closed.get()) return@withLock
+                val result = adapter.receive(bytes)
+                if (result.stateChanged) publishSnapshot()
+            }
+        }
+    }
+
+    /**
      * Starts one bounded connection cycle.
      *
      * Re-register and explicit refresh events may wake a dormant session, but duplicate
@@ -172,9 +205,9 @@ internal class EarbudDeviceSession(
                 transactionMutex.withLock {
                     val result = adapter.executeControl(request)
                     if (!result.accepted) return@withLock
-                    sendCommands(
+                    sendFrames(
                         activeChannel = activeChannel,
-                        commands = result.commands,
+                        frames = result.writeFrames(),
                         gapMs = COMMAND_GAP_MS,
                         description = request.description(),
                     )
@@ -182,9 +215,9 @@ internal class EarbudDeviceSession(
                     val readback = result.readback
                     if (readback.isNotEmpty()) {
                         delay(CONTROL_READBACK_DELAY_MS)
-                        sendCommands(
+                        sendFrames(
                             activeChannel = activeChannel,
-                            commands = readback,
+                            frames = readback.map { WriteFrame(it, null) },
                             gapMs = COMMAND_GAP_MS,
                             description = "${request.description()} readback",
                         )
@@ -519,6 +552,26 @@ internal class EarbudDeviceSession(
                 "$description wrote bytes=${command.toHex()}",
             )
             if (index != commands.lastIndex) delay(gapMs)
+        }
+    }
+
+    private suspend fun sendFrames(
+        activeChannel: EarbudChannel,
+        frames: List<WriteFrame>,
+        gapMs: Long,
+        description: String,
+    ) {
+        frames.forEachIndexed { index, frame ->
+            currentCoroutineContext().ensureActive()
+            if (closed.get() || channel !== activeChannel) {
+                throw CancellationException("stale vendor-channel writer")
+            }
+            activeChannel.write(frame.bytes, frame.targetId)
+            ModuleLog.debug(
+                COMPONENT,
+                "$description wrote bytes=${frame.bytes.toHex()} target=${frame.targetId}",
+            )
+            if (index != frames.lastIndex) delay(gapMs)
         }
     }
 
