@@ -116,6 +116,11 @@ class HonorX5sAtCodecTest {
             HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.OFF, null),
             HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 00 00 15 31")),
         )
+        // Connect-init frame (0x00, 0x01) and post-deep-command frames decode as deep ANC.
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.ANC, HonorX5sAtCodec.AncDepth.DEEP),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 00 01 05 10")),
+        )
     }
 
     @Test

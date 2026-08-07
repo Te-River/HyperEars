@@ -116,8 +116,9 @@ object HonorX5sAtCodec {
             return State(NoiseMode.ANC, depth)
         }
         return when (y) {
-            // Captured on connect-init: the earphone reports smart ANC as (0x00, 0x01).
-            0x01 -> State(NoiseMode.ANC, AncDepth.SMART)
+            // Captured on connect-init and after a deep-level ANC command: the earphone reports
+            // ANC at its deepest level as (0x00, 0x01), mirroring the wire order of ANC commands.
+            0x01 -> State(NoiseMode.ANC, AncDepth.DEEP)
             0x02 -> State(NoiseMode.TRANSPARENCY, null)
             0x00 -> State(NoiseMode.OFF, null)
             else -> null
