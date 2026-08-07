@@ -1,6 +1,7 @@
 package dev.hyperears.hook
 
 import android.view.View
+import android.view.ViewGroup
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -59,8 +60,34 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
             environment = environment,
         )
         depthItem.setOnClickListener(binding::onDepthTapped)
+        dumpCardImageViews(root)
         ModuleLog.debug("MiLinkUi", "bound Honor X5s Pro native depth item")
         return binding
+    }
+
+    /** One-shot inventory of card ImageViews so the headset icon slot can be identified. */
+    private fun dumpCardImageViews(root: View) {
+        if (cardImagesDumped.get()) return
+        cardImagesDumped.set(true)
+        var found = 0
+        root.forEachImageView { view ->
+            val idName = runCatching {
+                view.resources.getResourceEntryName(view.id)
+            }.getOrNull() ?: "0x${Integer.toHexString(view.id)}"
+            ModuleLog.debug(
+                "MiLinkUi",
+                "card ImageView id=$idName drawable=${view.drawable?.javaClass?.simpleName}",
+            )
+            found++
+        }
+        ModuleLog.debug("MiLinkUi", "card ImageView inventory done, found=$found")
+    }
+
+    private fun View.forEachImageView(block: (ImageView) -> Unit) {
+        if (this is ImageView) block(this)
+        if (this is ViewGroup) {
+            for (index in 0 until childCount) getChildAt(index).forEachImageView(block)
+        }
     }
 
     private class Binding(
@@ -135,6 +162,8 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
         "headset_image",
         "device_image",
     )
+
+    private val cardImagesDumped = java.util.concurrent.atomic.AtomicBoolean()
 }
 
 /** Pure cycle policy for the Honor ANC depth item; UI code contains no depth state logic. */
