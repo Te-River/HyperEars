@@ -41,13 +41,9 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
         val noiseIcon =
             noiseCancellation.findMiLinkView(ANC_ICON_ID) as? ImageView ?: return null
 
+        val depthIconDrawable = findHeadsetIcon(root, noiseIcon)
         depthTitle.text = HonorAncDepthControlPolicy.displayName(0)
-        depthIcon.setImageDrawable(
-            noiseIcon.drawable?.constantState
-                ?.newDrawable(root.resources)
-                ?.mutate()
-                ?: noiseIcon.drawable,
-        )
+        depthIcon.setImageDrawable(depthIconDrawable)
         depthItem.contentDescription = HonorAncDepthControlPolicy.displayName(0)
         depthItem.isSaveEnabled = false
         depthItem.isClickable = true
@@ -113,6 +109,32 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
     private const val ANC_ICON_ID = "anc_icon"
     private const val ENABLED_ALPHA = 1.0f
     private const val DISABLED_ALPHA = 0.45f
+
+    /**
+     * Prefers a headset-looking icon inside the card; falls back to the ANC icon. Candidate ids
+     * are resolved by name so ROM resource renames degrade to the fallback instead of failing.
+     */
+    private fun findHeadsetIcon(root: View, noiseIcon: ImageView): android.graphics.drawable.Drawable? {
+        HEADSET_ICON_IDS.mapNotNull { name ->
+            runCatching { root.findMiLinkView(name) as? ImageView }.getOrNull()
+        }.firstOrNull { it.drawable != null }?.let { candidate ->
+            ModuleLog.debug("MiLinkUi", "depth item uses headset icon from $HEADSET_ICON_IDS")
+            return candidate.drawable
+        }
+        return noiseIcon.drawable?.constantState
+            ?.newDrawable(root.resources)
+            ?.mutate()
+            ?: noiseIcon.drawable
+    }
+
+    private val HEADSET_ICON_IDS = listOf(
+        "headset_icon",
+        "device_icon",
+        "headset_icon_img",
+        "ic_headset",
+        "headset_image",
+        "device_image",
+    )
 }
 
 /** Pure cycle policy for the Honor ANC depth item; UI code contains no depth state logic. */
