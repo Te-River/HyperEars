@@ -25,9 +25,10 @@ class HonorX5sProAdapterTest {
     }
 
     @Test
-    fun declaresSppTransportAndThreeModes() {
+    fun declaresSppTransportAndSupportedModes() {
+        // WIND is accepted only as the ANC-depth cycle trigger, not as a physical mode.
         assertEquals(
-            setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY),
+            setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY, NoiseMode.WIND),
             adapter.effectiveSupportedNoiseModes(),
         )
         assertTrue(adapter.effectiveCapabilities().battery)
@@ -70,12 +71,6 @@ class HonorX5sProAdapterTest {
     }
 
     @Test
-    fun windNoiseModeIsRejected() {
-        val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.WIND))
-        assertFalse(result.accepted)
-    }
-
-    @Test
     fun hfpAtBatteryLineProducesBatteryEvent() {
         val result = adapter.receive(
             "AT+HUAWEIBATTERY=6,2,100,3,0,4,100,5,0,6,71,7,0\r\n".toByteArray(Charsets.US_ASCII),
@@ -98,6 +93,21 @@ class HonorX5sProAdapterTest {
 
         adapter.receive(hex("5A 00 07 00 2B 2A 01 02 00 00 15 31"))
         assertEquals(NoiseMode.OFF, adapter.runtimeState().noiseMode)
+    }
+
+    @Test
+    fun stateFrameDepthIsAppliedToFollowingAncCommand() {
+        // Earphone reports light depth; the next ANC command must use it.
+        adapter.receive(hex("5A 00 07 00 2B 2A 01 02 01 02 63 72"))
+        val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.ANC))
+        assertTrue(result.accepted)
+        assertArrayEquals(
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.LIGHT,
+            ),
+            result.commands[0],
+        )
     }
 
     @Test
