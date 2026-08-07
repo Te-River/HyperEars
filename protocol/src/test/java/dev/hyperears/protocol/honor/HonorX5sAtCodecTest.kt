@@ -59,6 +59,66 @@ class HonorX5sAtCodecTest {
     }
 
     @Test
+    fun ancDepthCommandsMatchCapturedVendorFrames() {
+        assertEquals(
+            "5A 00 07 00 2B 04 01 02 01 01 F1 3D",
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.SMART,
+            ).hex(),
+        )
+        assertEquals(
+            "5A 00 07 00 2B 04 01 02 01 02 C1 5E",
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.LIGHT,
+            ).hex(),
+        )
+        assertEquals(
+            "5A 00 07 00 2B 04 01 02 01 03 D1 7F",
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.MEDIUM,
+            ).hex(),
+        )
+        assertEquals(
+            "5A 00 07 00 2B 04 01 02 01 00 E1 1C",
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.DEEP,
+            ).hex(),
+        )
+    }
+
+    @Test
+    fun stateFramesDecodeDepthAndMode() {
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.ANC, HonorX5sAtCodec.AncDepth.SMART),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 01 01 36 21")),
+        )
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.ANC, HonorX5sAtCodec.AncDepth.LIGHT),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 01 02 63 72")),
+        )
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.ANC, HonorX5sAtCodec.AncDepth.MEDIUM),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 01 03 50 43")),
+        )
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.ANC, HonorX5sAtCodec.AncDepth.DEEP),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 01 00 05 10")),
+        )
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.TRANSPARENCY, null),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 00 02 35 73")),
+        )
+        assertEquals(
+            HonorX5sAtCodec.State(HonorX5sAtCodec.NoiseMode.OFF, null),
+            HonorX5sAtCodec.stateFromFrame(hex("5A 00 07 00 2B 2A 01 02 00 00 15 31")),
+        )
+    }
+
+    @Test
     fun stateFramesDecodeBackToModes() {
         assertEquals(
             HonorX5sAtCodec.NoiseMode.ANC,
