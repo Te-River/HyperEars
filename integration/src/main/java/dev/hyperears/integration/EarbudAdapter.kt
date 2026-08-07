@@ -204,7 +204,10 @@ abstract class EarbudAdapter(
             return AdapterControlResult(accepted = request === ControlRequest.Refresh)
         }
         val commands = protocolSession.encode(request)
-        if (commands.isEmpty() && request !== ControlRequest.Refresh) {
+        val targetedCommands = (protocolSession as? TargetedProtocolSession)
+            ?.encodeTargeted(request)
+            .orEmpty()
+        if (commands.isEmpty() && targetedCommands.isEmpty() && request !== ControlRequest.Refresh) {
             return AdapterControlResult(accepted = false)
         }
         var changed = false
@@ -218,6 +221,7 @@ abstract class EarbudAdapter(
         return AdapterControlResult(
             accepted = true,
             commands = commands,
+            targetedCommands = targetedCommands,
             readback = protocolSession.readback(request),
             stateChanged = changed,
         )
@@ -333,6 +337,7 @@ object EarbudAdapterRegistry {
         add(::RoseEarbudAdapter)
         add(::NiceHckYuanDaoOrigAdapter)
         add(::NiceHckEarbudAdapter)
+        add(::HonorX5sProAdapter)
         // Apple devices are handled by the platform; keep AAP code available for explicit use,
         // but do not add Apple adapters to HyperEars' default matching chain.
         addAll(SonyAdapterRegistry.factories)
