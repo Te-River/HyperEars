@@ -7,15 +7,18 @@
 ### Added
 
 - 新增荣耀亲选 X5s Pro（BTV-ME10）适配：通过 HFP `AT+HUAWEIBATTERY` 指令上报左右耳与充电盒
-  电量，并通过 BLE GATT 三个独立特征值写入实现降噪/透传/普通模式切换，接入小米控制中心。
+  电量，并通过设备私有 RFCOMM SPP 通道的 `5A 00` 帧协议实现降噪/透传/普通模式切换，接入
+  小米控制中心；关于页设备支持列表同步新增荣耀条目。
 
-### Architecture
+### Fixed
 
-- `GattTransportSpec` 增加可选的多模式写目标映射 `modeWriteTargets`，支持按噪声模式路由到不同
-  GATT 特征值；`EarbudChannel` 新增带默认实现的按目标写入重载；新增 `TargetedProtocolSession`
-  可选接口与 `TargetedCommand` 帧，经典会话行为完全不变。
-- 新增 HFP AT 报告链路：蓝牙进程 hook 捕获 `AT+HUAWEIBATTERY` 后经会话门面注入协议解码器，
-  电量解析保持纯 JVM 可测；GATT 服务发现时打印完整服务表调试日志。
+- 修正荣耀 X5s Pro 模式控制协议：经三份实机抓包交叉验证，原基于抓包误读的 BLE GATT 特征值
+  写入方案（实为服务发现响应）替换为 RFCOMM SPP 私有帧命令
+  `5A 00 07 00 2B 04 01 02 <mode> 00 <crc>`（01=降噪、02=透传、00=关闭），并解析耳机回传的
+  模式状态帧 `2B 2A 01 02 00 <mode>`。
+- 回退不再需要的 GATT 多模式写目标传输层扩展（`GattTransportSpec.modeWriteTargets`、
+  `TargetedProtocolSession`、`EarbudChannel` 按目标写入重载），保持基础架构不变；GATT 服务表
+  调试日志保留。
 
 ## [1.2.0] - 2026-08-05
 
