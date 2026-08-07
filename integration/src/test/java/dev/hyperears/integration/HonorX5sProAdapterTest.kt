@@ -26,9 +26,9 @@ class HonorX5sProAdapterTest {
 
     @Test
     fun declaresSppTransportAndSupportedModes() {
-        // WIND is accepted only as the ANC-depth cycle trigger, not as a physical mode.
+        // Like the OPPO and vivo adapters, only MiLink's native three-state ANC is exposed.
         assertEquals(
-            setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY, NoiseMode.WIND),
+            setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY),
             adapter.effectiveSupportedNoiseModes(),
         )
         assertTrue(adapter.effectiveCapabilities().battery)
@@ -137,22 +137,9 @@ class HonorX5sProAdapterTest {
     }
 
     @Test
-    fun windCyclesAncDepthAndReissuesAncCommand() {
-        // Default depth is smart (0x01); cycles follow the vendor order light -> medium -> deep.
-        val expected = listOf(
-            HonorX5sAtCodec.AncDepth.LIGHT,
-            HonorX5sAtCodec.AncDepth.MEDIUM,
-            HonorX5sAtCodec.AncDepth.DEEP,
-            HonorX5sAtCodec.AncDepth.SMART,
-        )
-        expected.forEach { depth ->
-            val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.WIND))
-            assertTrue(result.accepted)
-            assertArrayEquals(
-                HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC, depth),
-                result.commands[0],
-            )
-        }
+    fun windNoiseModeIsRejected() {
+        val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.WIND))
+        assertFalse(result.accepted)
     }
 
     @Test

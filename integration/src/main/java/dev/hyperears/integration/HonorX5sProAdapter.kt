@@ -12,8 +12,9 @@ import dev.hyperears.protocol.honor.HonorX5sAtCodec
  * ANC depth 01=smart, 02=light, 03=medium, 00=deep. The earphone reports its state back as
  * `5A 00 07 00 2B 2A 01 02 <x> <y> <crc>`.
  *
- * [NoiseMode.WIND] is not a physical mode on this model; it is accepted as the ANC-depth cycle
- * trigger for the MiLink card extension and encoded as ANC with the newly selected depth.
+ * ANC depth levels are read-compatible like the OPPO intensity values: the earphone's depth is
+ * tracked from its state reports and carried by ANC commands, but no depth-switching UI is
+ * exposed until the common domain gains a distinct adaptive-mode model.
  */
 class HonorX5sProAdapter : StandardEarbudAdapter() {
     override val id: String = ID
@@ -29,24 +30,12 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         audioHandoff = true,
     )
     override val supportedNoiseModes: Set<NoiseMode> =
-        setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY, NoiseMode.WIND)
+        setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY)
     override val miLinkCardPresentationId: MiLinkCardPresentationId = PRESENTATION_ID
 
     /** Defaults to the vendor app's smart level until the earphone reports its own state. */
     @Volatile
     private var ancDepth: HonorX5sAtCodec.AncDepth = HonorX5sAtCodec.AncDepth.SMART
-
-    /** Next depth in the vendor order smart -> light -> medium -> deep. */
-    fun cycleAncDepth(): HonorX5sAtCodec.AncDepth {
-        val next = when (ancDepth) {
-            HonorX5sAtCodec.AncDepth.SMART -> HonorX5sAtCodec.AncDepth.LIGHT
-            HonorX5sAtCodec.AncDepth.LIGHT -> HonorX5sAtCodec.AncDepth.MEDIUM
-            HonorX5sAtCodec.AncDepth.MEDIUM -> HonorX5sAtCodec.AncDepth.DEEP
-            HonorX5sAtCodec.AncDepth.DEEP -> HonorX5sAtCodec.AncDepth.SMART
-        }
-        ancDepth = next
-        return next
-    }
 
     override fun matches(identity: EarbudIdentity): Boolean =
         normalizeDeviceName(identity.deviceName.orEmpty()) == "荣耀亲选耳机x5spro"
@@ -62,7 +51,6 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         HonorX5sProProtocolSession(
             depthProvider = { ancDepth },
             depthSink = { ancDepth = it },
-            onWindCycle = ::cycleAncDepth,
         )
 
     companion object {
@@ -75,21 +63,15 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
 private class HonorX5sProProtocolSession(
     private val depthProvider: () -> HonorX5sAtCodec.AncDepth,
     private val depthSink: (HonorX5sAtCodec.AncDepth) -> Unit,
-    private val onWindCycle: () -> Unit,
 ) : ProtocolSession {
 
     override fun initialReadCommands(): List<ByteArray> = listOf(HonorX5sAtCodec.queryBattery)
 
     override fun encode(request: ControlRequest): List<ByteArray> = when (request) {
         ControlRequest.Refresh -> listOf(HonorX5sAtCodec.queryBattery)
-        is ControlRequest.SetNoiseMode -> if (request.mode == NoiseMode.WIND) {
-            // The card extension cycles ANC depth through the vendor's non-physical WIND mode;
-            // the encoded frame is always ANC with the freshly selected depth.
-            onWindCycle()
-            listOf(HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC, depthProvider()))
-        } else {
-            listOf(HonorX5sAtCodec.modeCommand(request.mode.toWireMode(), depthProvider()))
-        }
+        is ControlRequest.SetNoiseMode -> listOf(
+            HonorX5sAtCodec.modeCommand(request.mode.toWireMode(), depthProvider()),
+        )
     }
 
     override fun readback(request: ControlRequest): List<ByteArray> = emptyList()
