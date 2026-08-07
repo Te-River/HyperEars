@@ -5,9 +5,11 @@ import dev.hyperears.protocol.honor.HonorX5sAtCodec
 /**
  * Concrete adapter for the Honor X5s Pro (BTV-ME10).
  *
- * Battery telemetry arrives out-of-band through the system HFP channel (`AT+HUAWEIBATTERY`)
- * and is injected into the session by the HFP hook; noise modes are written as fixed payloads
- * to three distinct GATT characteristics declared in [GattTransportSpec.modeWriteTargets].
+ * Battery telemetry arrives over the system HFP channel (`AT+HUAWEIBATTERY`) and is injected
+ * into the session by the HFP hook. Noise modes are controlled through the device's private
+ * RFCOMM SPP channel using `5A 00` framed commands captured from the vendor app:
+ * `5A 00 07 00 2B 04 01 02 <mode> 00 <crc>` with mode 01=ANC, 02=transparency, 00=off.
+ * The earphone reports its current mode back as `5A 00 07 00 2B 2A 01 02 00 <mode> <crc>`.
  */
 class HonorX5sProAdapter : StandardEarbudAdapter() {
     override val id: String = ID
@@ -29,15 +31,9 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         normalizeDeviceName(identity.deviceName.orEmpty()) == "荣耀亲选耳机x5spro"
 
     override val transports: List<EarbudTransportSpec> = listOf(
-        GattTransportSpec(
-            writeCharacteristicUuid = DEFAULT_WRITE_UUID,
-            notifyCharacteristicUuid = NOTIFY_UUID,
-            modeWriteTargets = mapOf(
-                NoiseMode.ANC to GattWriteTarget(ANC_WRITE_UUID),
-                NoiseMode.TRANSPARENCY to GattWriteTarget(TRANSPARENCY_WRITE_UUID),
-                NoiseMode.OFF to GattWriteTarget(NORMAL_WRITE_UUID),
-            ),
-            id = "honor-x5spro-gatt",
+        RfcommEndpointSpec.ServiceUuid(
+            uuid = SPP_UUID,
+            id = "honor-x5spro-spp",
         ),
     )
 
@@ -45,37 +41,25 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
 
     companion object {
         const val ID = "honor-x5spro"
-
-        // UUIDs are placeholders pending GATT service-table capture. The captured attribute
-        // handles are 0x9A14 (ANC), 0x9D06 (transparency) and 0x0106 (normal); the runtime
-        // resolves characteristics by UUID and never by handle.
-        const val DEFAULT_WRITE_UUID = "0000FFF1-0000-1000-8000-00805F9B34FB"
-        const val ANC_WRITE_UUID = "0000FFF2-0000-1000-8000-00805F9B34FB"
-        const val TRANSPARENCY_WRITE_UUID = "0000FFF3-0000-1000-8000-00805F9B34FB"
-        const val NORMAL_WRITE_UUID = "0000FFF4-0000-1000-8000-00805F9B34FB"
-        const val NOTIFY_UUID = "0000FFF5-0000-1000-8000-00805F9B34FB"
+        const val SPP_UUID = "00001101-0000-1000-8000-00805F9B34FB"
     }
 }
 
-private class HonorX5sProProtocolSession : TargetedProtocolSession {
+private class HonorX5sProProtocolSession : ProtocolSession {
 
     override fun initialReadCommands(): List<ByteArray> = emptyList()
 
-    override fun encode(request: ControlRequest): List<ByteArray> = emptyList()
-
-    override fun encodeTargeted(request: ControlRequest): List<TargetedCommand> = when (request) {
+    override fun encode(request: ControlRequest): List<ByteArray> = when (request) {
         ControlRequest.Refresh -> emptyList()
         is ControlRequest.SetNoiseMode -> listOf(
-            TargetedCommand(
-                bytes = HonorX5sAtCodec.modePayload(request.mode.toWireMode()),
-                targetId = request.mode.name,
-            ),
+            HonorX5sAtCodec.modeCommand(request.mode.toWireMode()),
         )
     }
 
     override fun readback(request: ControlRequest): List<ByteArray> = emptyList()
 
     override fun offer(bytes: ByteArray): List<ProtocolEvent> = buildList {
+        if (HonorX5sAtCodec.isHeartbeat(bytes)) return@buildList
         HonorX5sAtCodec.parseHuaweiBattery(String(bytes, Charsets.US_ASCII))?.let { battery ->
             add(ProtocolEvent.CapabilitiesIdentified(battery = true))
             add(
@@ -89,7 +73,7 @@ private class HonorX5sProProtocolSession : TargetedProtocolSession {
             )
             return@buildList
         }
-        HonorX5sAtCodec.noiseModeForPayload(bytes)?.let { mode ->
+        HonorX5sAtCodec.modeFromStateFrame(bytes)?.let { mode ->
             add(
                 ProtocolEvent.CapabilitiesIdentified(
                     battery = false,

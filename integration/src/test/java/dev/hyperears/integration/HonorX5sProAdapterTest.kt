@@ -25,7 +25,7 @@ class HonorX5sProAdapterTest {
     }
 
     @Test
-    fun declaresTheThreeNativeModesWithoutWind() {
+    fun declaresSppTransportAndThreeModes() {
         assertEquals(
             setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY),
             adapter.effectiveSupportedNoiseModes(),
@@ -33,35 +33,37 @@ class HonorX5sProAdapterTest {
         assertTrue(adapter.effectiveCapabilities().battery)
         assertTrue(adapter.effectiveCapabilities().noiseControl)
         assertEquals(BatterySource.PRIVATE_PROTOCOL, adapter.effectiveBatterySource())
-        assertEquals(1, adapter.transports.size)
-        val transport = adapter.transports.single() as GattTransportSpec
-        assertEquals(3, transport.modeWriteTargets.size)
+        val transport = adapter.transports.single() as RfcommEndpointSpec.ServiceUuid
+        assertEquals(HonorX5sProAdapter.SPP_UUID, transport.uuid)
     }
 
     @Test
-    fun ancCommandTargetsItsDedicatedCharacteristic() {
+    fun ancCommandUsesCapturedVendorFrame() {
         val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.ANC))
         assertTrue(result.accepted)
-        assertEquals(1, result.targetedCommands.size)
+        assertEquals(1, result.commands.size)
         assertArrayEquals(
-            HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.ANC),
-            result.targetedCommands[0].bytes,
+            HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC),
+            result.commands[0],
         )
-        assertEquals("ANC", result.targetedCommands[0].targetId)
         assertTrue(result.stateChanged)
         assertEquals(NoiseMode.ANC, adapter.runtimeState().noiseMode)
     }
 
     @Test
-    fun everyModeRoutesToItsOwnTarget() {
+    fun everyModeEncodesToItsCapturedCommand() {
         mapOf(
-            NoiseMode.ANC to "ANC",
-            NoiseMode.TRANSPARENCY to "TRANSPARENCY",
-            NoiseMode.OFF to "OFF",
-        ).forEach { (mode, expectedTarget) ->
+            NoiseMode.ANC to HonorX5sAtCodec.NoiseMode.ANC,
+            NoiseMode.TRANSPARENCY to HonorX5sAtCodec.NoiseMode.TRANSPARENCY,
+            NoiseMode.OFF to HonorX5sAtCodec.NoiseMode.OFF,
+        ).forEach { (mode, wireMode) ->
             val result = adapter.executeControl(ControlRequest.SetNoiseMode(mode))
             assertTrue("$mode rejected", result.accepted)
-            assertEquals("$mode target", expectedTarget, result.targetedCommands[0].targetId)
+            assertArrayEquals(
+                "captured command for $mode",
+                HonorX5sAtCodec.modeCommand(wireMode),
+                result.commands[0],
+            )
         }
     }
 
@@ -74,21 +76,41 @@ class HonorX5sProAdapterTest {
     @Test
     fun hfpAtBatteryLineProducesBatteryEvent() {
         val result = adapter.receive(
-            "AT+HUAWEIBATTERY=3,2,100,4,88,6,75\r\n".toByteArray(Charsets.US_ASCII),
+            "AT+HUAWEIBATTERY=6,2,100,3,0,4,100,5,0,6,71,7,0\r\n".toByteArray(Charsets.US_ASCII),
         )
         val battery = adapter.runtimeState().battery
         assertEquals(100, battery.left.percent)
-        assertEquals(88, battery.right.percent)
-        assertEquals(75, battery.case.percent)
+        assertEquals(100, battery.right.percent)
+        assertEquals(71, battery.case.percent)
         assertTrue(result.stateChanged)
     }
 
     @Test
-    fun unknownAtLineIsIgnoredWithoutStateChange() {
+    fun stateFrameUpdatesNoiseMode() {
+        val result = adapter.receive(hex("5A 00 07 00 2B 2A 01 02 00 01 05 10"))
+        assertTrue(result.stateChanged)
+        assertEquals(NoiseMode.ANC, adapter.runtimeState().noiseMode)
+
+        adapter.receive(hex("5A 00 07 00 2B 2A 01 02 00 02 35 73"))
+        assertEquals(NoiseMode.TRANSPARENCY, adapter.runtimeState().noiseMode)
+
+        adapter.receive(hex("5A 00 07 00 2B 2A 01 02 00 00 15 31"))
+        assertEquals(NoiseMode.OFF, adapter.runtimeState().noiseMode)
+    }
+
+    @Test
+    fun heartbeatFrameIsIgnoredWithoutStateChange() {
         val before = adapter.runtimeState()
-        val result = adapter.receive("AT+IPHONEACCEV=1,1,5\r\n".toByteArray(Charsets.US_ASCII))
+        val result = adapter.receive(hex("5A 00 05 00 2B 79 01 00 45 E0"))
         assertFalse(result.stateChanged)
         assertEquals(before, adapter.runtimeState())
+    }
+
+    private fun hex(value: String): ByteArray {
+        val compact = value.filterNot(Char::isWhitespace)
+        return ByteArray(compact.length / 2) { index ->
+            compact.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
     }
 
     private fun identity(name: String): EarbudIdentity =
