@@ -13,8 +13,8 @@ import dev.hyperears.protocol.honor.HonorX5sAtCodec
  * `5A 00 07 00 2B 2A 01 02 <x> <y> <crc>`.
  *
  * ANC depth levels are read-compatible like the OPPO intensity values: the earphone's depth is
- * tracked from its state reports and carried by ANC commands, but no depth-switching UI is
- * exposed until the common domain gains a distinct adaptive-mode model.
+ * parsed from its state reports, but ANC commands always use the vendor app's smart level so the
+ * card never overrides the depth the user chose in the vendor app.
  */
 class HonorX5sProAdapter : StandardEarbudAdapter() {
     override val id: String = ID
@@ -33,10 +33,6 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY)
     override val miLinkCardPresentationId: MiLinkCardPresentationId = PRESENTATION_ID
 
-    /** Defaults to the vendor app's smart level until the earphone reports its own state. */
-    @Volatile
-    private var ancDepth: HonorX5sAtCodec.AncDepth = HonorX5sAtCodec.AncDepth.SMART
-
     override fun matches(identity: EarbudIdentity): Boolean =
         normalizeDeviceName(identity.deviceName.orEmpty()) == "荣耀亲选耳机x5spro"
 
@@ -47,11 +43,7 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         ),
     )
 
-    override fun createProtocolSession(): ProtocolSession =
-        HonorX5sProProtocolSession(
-            depthProvider = { ancDepth },
-            depthSink = { ancDepth = it },
-        )
+    override fun createProtocolSession(): ProtocolSession = HonorX5sProProtocolSession()
 
     companion object {
         const val ID = "honor-x5spro"
@@ -60,17 +52,14 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
     }
 }
 
-private class HonorX5sProProtocolSession(
-    private val depthProvider: () -> HonorX5sAtCodec.AncDepth,
-    private val depthSink: (HonorX5sAtCodec.AncDepth) -> Unit,
-) : ProtocolSession {
+private class HonorX5sProProtocolSession : ProtocolSession {
 
     override fun initialReadCommands(): List<ByteArray> = listOf(HonorX5sAtCodec.queryBattery)
 
     override fun encode(request: ControlRequest): List<ByteArray> = when (request) {
         ControlRequest.Refresh -> listOf(HonorX5sAtCodec.queryBattery)
         is ControlRequest.SetNoiseMode -> listOf(
-            HonorX5sAtCodec.modeCommand(request.mode.toWireMode(), depthProvider()),
+            HonorX5sAtCodec.modeCommand(request.mode.toWireMode(), ANC_DEPTH),
         )
     }
 
@@ -105,7 +94,6 @@ private class HonorX5sProProtocolSession(
             return@buildList
         }
         HonorX5sAtCodec.stateFromFrame(bytes)?.let { state ->
-            state.depth?.let(depthSink)
             add(
                 ProtocolEvent.CapabilitiesIdentified(
                     battery = false,
@@ -129,5 +117,10 @@ private class HonorX5sProProtocolSession(
         HonorX5sAtCodec.NoiseMode.ANC -> NoiseMode.ANC
         HonorX5sAtCodec.NoiseMode.OFF -> NoiseMode.OFF
         HonorX5sAtCodec.NoiseMode.TRANSPARENCY -> NoiseMode.TRANSPARENCY
+    }
+
+    private companion object {
+        // ANC commands always request the vendor app's smart level.
+        val ANC_DEPTH = HonorX5sAtCodec.AncDepth.SMART
     }
 }

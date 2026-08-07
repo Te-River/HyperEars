@@ -122,15 +122,16 @@ class HonorX5sProAdapterTest {
     }
 
     @Test
-    fun stateFrameDepthIsAppliedToFollowingAncCommand() {
-        // Earphone reports light depth; the next ANC command must use it.
+    fun ancCommandAlwaysUsesSmartDepth() {
+        // Even when the earphone reports a non-smart depth, ANC commands stay on the smart level
+        // so the card never overrides the depth chosen in the vendor app.
         adapter.receive(hex("5A 00 07 00 2B 2A 01 02 01 02 63 72"))
         val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.ANC))
         assertTrue(result.accepted)
         assertArrayEquals(
             HonorX5sAtCodec.modeCommand(
                 HonorX5sAtCodec.NoiseMode.ANC,
-                HonorX5sAtCodec.AncDepth.LIGHT,
+                HonorX5sAtCodec.AncDepth.SMART,
             ),
             result.commands[0],
         )
