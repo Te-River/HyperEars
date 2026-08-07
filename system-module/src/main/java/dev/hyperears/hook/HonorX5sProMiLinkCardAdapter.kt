@@ -1,10 +1,8 @@
 package dev.hyperears.hook
 
-import android.util.TypedValue
-import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
-import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.isVisible
 import dev.hyperears.integration.EarbudState
@@ -16,10 +14,11 @@ import java.lang.ref.WeakReference
 /**
  * Adds Honor X5s Pro ANC depth cycling to MiLink's stock three-state ANC card.
  *
- * Depth levels (deep/smart/light/medium) are not physical MiLink modes; the card exposes a
- * tappable depth label beside the ANC title. Each tap cycles the vendor depth order and sends
- * the adapter's WIND trigger, which encodes an ANC command with the freshly selected depth.
- * The label keeps its own index because [EarbudState] carries no depth projection.
+ * Depth levels (deep/smart/light/medium) are not physical MiLink modes; a native host ANC item
+ * (same icon and layout as the ANC row) is appended to the card as a depth indicator. Tapping the
+ * item cycles the vendor depth order and sends the adapter's WIND trigger, which encodes an ANC
+ * command with the freshly selected depth. The item title keeps its own index because
+ * [EarbudState] carries no depth projection; order and naming live in [HonorAncDepthControlPolicy].
  */
 internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
     override val presentationId: MiLinkCardPresentationId = HonorX5sProAdapter.PRESENTATION_ID
@@ -29,123 +28,98 @@ internal object HonorX5sProMiLinkCardAdapter : MiLinkCardAdapter {
         address: String,
         environment: MiLinkCardEnvironment,
     ): MiLinkCardBinding? {
-        val title = root.findMiLinkView(ANC_CARD_TITLE_ID) as? TextView ?: return null
-        val ancCard = root.findMiLinkView(ANC_CARD_ID) ?: return null
-        val parent = title.parent as? ViewGroup ?: return null
-        val index = parent.indexOfChild(title).takeIf { it >= 0 } ?: return null
-        val originalParams = title.layoutParams
-        val originalWidth = originalParams.width
+        val ancCard = root.findMiLinkView(ANC_CARD_ID) as? LinearLayout ?: return null
+        val noiseCancellation = root.findMiLinkView(ANC_NOISE_CANCELLATION_ID) ?: return null
 
-        parent.removeViewAt(index)
-        val wrapper = FrameLayout(root.context).apply {
-            layoutParams = originalParams.apply {
-                width = ViewGroup.LayoutParams.MATCH_PARENT
-            }
-        }
-        title.layoutParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT,
+        val depthItem = createNativeMiLinkAncItem(
+            context = root.context,
+            hostClassLoader = environment.hostClassLoader,
+            layoutTemplate = noiseCancellation,
+        ) ?: return null
+        val depthTitle = depthItem.findMiLinkView(ANC_TITLE_ID) as? TextView ?: return null
+        val depthIcon = depthItem.findMiLinkView(ANC_ICON_ID) as? ImageView ?: return null
+        val noiseIcon =
+            noiseCancellation.findMiLinkView(ANC_ICON_ID) as? ImageView ?: return null
+
+        depthTitle.text = HonorAncDepthControlPolicy.displayName(0)
+        depthIcon.setImageDrawable(
+            noiseIcon.drawable?.constantState
+                ?.newDrawable(root.resources)
+                ?.mutate()
+                ?: noiseIcon.drawable,
         )
-        wrapper.addView(title)
+        depthItem.contentDescription = HonorAncDepthControlPolicy.displayName(0)
+        depthItem.isSaveEnabled = false
+        depthItem.isClickable = true
+        depthItem.isFocusable = true
 
-        val depthLabel = TextView(root.context).apply {
-            text = DEPTH_NAMES[0]
-            setTextColor(title.currentTextColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, title.textSize)
-            typeface = title.typeface
-            setPadding(0, 0, root.context.dp(END_PADDING_DP), 0)
-            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-        }
-        wrapper.addView(
-            depthLabel,
-            FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.END or Gravity.CENTER_VERTICAL,
-            ),
-        )
-        parent.addView(wrapper, index)
+        ancCard.addView(depthItem)
 
-        return Binding(
-            parent = parent,
-            originalIndex = index,
-            originalLayoutParams = originalParams,
-            originalWidth = originalWidth,
-            wrapper = wrapper,
-            title = title,
-            ancCard = ancCard,
-            depthLabel = depthLabel,
+        val binding = Binding(
+            parent = ancCard,
+            depthItem = depthItem,
+            depthTitle = depthTitle,
             address = address,
             environment = environment,
-        ).also { binding ->
-            depthLabel.setOnClickListener(binding::onDepthTapped)
-            ModuleLog.debug("MiLinkUi", "bound Honor X5s Pro depth label")
-        }
+        )
+        depthItem.setOnClickListener(binding::onDepthTapped)
+        ModuleLog.debug("MiLinkUi", "bound Honor X5s Pro native depth item")
+        return binding
     }
 
     private class Binding(
-        parent: ViewGroup,
-        private val originalIndex: Int,
-        private val originalLayoutParams: ViewGroup.LayoutParams,
-        private val originalWidth: Int,
-        wrapper: View,
-        title: View,
-        ancCard: View,
-        depthLabel: TextView,
+        parent: LinearLayout,
+        depthItem: View,
+        depthTitle: TextView,
         private val address: String,
         private val environment: MiLinkCardEnvironment,
     ) : MiLinkCardBinding {
         private val parent = WeakReference(parent)
-        private val wrapper = WeakReference(wrapper)
-        private val title = WeakReference(title)
-        private val ancCard = WeakReference(ancCard)
-        private val depthLabel = WeakReference(depthLabel)
+        private val depthItem = WeakReference(depthItem)
+        private val depthTitle = WeakReference(depthTitle)
 
-        // Vendor cycle order: deep -> smart -> light -> medium -> deep.
         private var depthIndex = 0
 
         override fun render(state: EarbudState) {
-            val wrapper = wrapper.get() ?: return
-            val title = title.get() ?: return
-            val ancCard = ancCard.get() ?: return
-            val depthLabel = depthLabel.get() ?: return
-
-            wrapper.visibility = ancCard.visibility
-            depthLabel.visibility =
-                if (ancCard.isVisible && title.isVisible && state.noiseMode == NoiseMode.ANC) {
-                    View.VISIBLE
-                } else {
-                    View.GONE
-                }
+            val depthItem = depthItem.get() ?: return
+            // Depth is a sub-option of ANC: visible and enabled only while ANC is active.
+            val enabled = state.sessionActive && state.connected && state.noiseMode == NoiseMode.ANC
+            depthItem.isVisible = enabled
+            depthItem.isEnabled = enabled
+            depthItem.alpha = if (enabled) ENABLED_ALPHA else DISABLED_ALPHA
         }
 
         fun onDepthTapped(view: View) {
-            depthIndex = (depthIndex + 1) % DEPTH_NAMES.size
-            depthLabel.get()?.text = DEPTH_NAMES[depthIndex]
+            depthIndex = HonorAncDepthControlPolicy.nextIndex(depthIndex)
+            val name = HonorAncDepthControlPolicy.displayName(depthIndex)
+            depthTitle.get()?.text = name
+            depthItem.get()?.contentDescription = name
             environment.controlSender(address, NoiseMode.WIND)
         }
 
         override fun unbind() {
             val parent = parent.get() ?: return
-            val wrapper = wrapper.get() ?: return
-            val title = title.get() ?: return
-            val depthLabel = depthLabel.get()
-            depthLabel?.setOnClickListener(null)
-            if (wrapper.parent !== parent) return
+            val depthItem = depthItem.get() ?: return
+            if (depthItem.parent !== parent) return
 
-            (title.parent as? ViewGroup)?.removeView(title)
-            parent.removeView(wrapper)
-            originalLayoutParams.width = originalWidth
-            title.layoutParams = originalLayoutParams
-            parent.addView(title, originalIndex.coerceAtMost(parent.childCount))
+            depthItem.setOnClickListener(null)
+            parent.removeView(depthItem)
         }
     }
 
-    private fun android.content.Context.dp(value: Int): Int =
-        (value * resources.displayMetrics.density).toInt()
-
-    private const val ANC_CARD_TITLE_ID = "anc_card_title"
     private const val ANC_CARD_ID = "anc_card"
-    private const val END_PADDING_DP = 8
+    private const val ANC_NOISE_CANCELLATION_ID = "anc_noise_cancel"
+    private const val ANC_TITLE_ID = "anc_title"
+    private const val ANC_ICON_ID = "anc_icon"
+    private const val ENABLED_ALPHA = 1.0f
+    private const val DISABLED_ALPHA = 0.45f
+}
+
+/** Pure cycle policy for the Honor ANC depth item; UI code contains no depth state logic. */
+internal object HonorAncDepthControlPolicy {
     private val DEPTH_NAMES = arrayOf("深度", "智能", "轻度", "中度")
+
+    fun displayName(index: Int): String = DEPTH_NAMES[index]
+
+    fun nextIndex(index: Int): Int = (index + 1) % DEPTH_NAMES.size
 }
