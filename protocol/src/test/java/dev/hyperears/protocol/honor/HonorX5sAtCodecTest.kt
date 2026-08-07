@@ -143,6 +143,37 @@ class HonorX5sAtCodecTest {
         assertFalse(HonorX5sAtCodec.isHeartbeat(byteArrayOf(1, 2, 3)))
     }
 
+    @Test
+    fun batteryReportFramesDecodeComponents() {
+        // Captured 15:53: case 71, buds 100/100 (0x47 0x64 0x64).
+        val report = HonorX5sAtCodec.parseBatteryFrame(
+            hex("5A 00 10 00 01 27 01 01 47 02 03 64 64 47 03 03 64 64 00 EF 9F"),
+        )!!
+        assertEquals(100, report.leftPercent)
+        assertEquals(100, report.rightPercent)
+        assertEquals(71, report.casePercent)
+
+        // Captured 17:26: case 70, buds 100/100 (0x46 0x64 0x64).
+        val report2 = HonorX5sAtCodec.parseBatteryFrame(
+            hex("5A 00 10 00 01 08 01 01 46 02 03 64 64 46 03 03 64 64 00 74 D4"),
+        )!!
+        assertEquals(100, report2.leftPercent)
+        assertEquals(100, report2.rightPercent)
+        assertEquals(70, report2.casePercent)
+    }
+
+    @Test
+    fun batteryQueryMatchesCapturedVendorFrame() {
+        assertEquals(
+            "5A 00 09 00 01 08 01 00 02 00 03 00 FB B9",
+            HonorX5sAtCodec.queryBattery.hex(),
+        )
+        assertEquals(
+            null,
+            HonorX5sAtCodec.parseBatteryFrame(hex("5A 00 07 00 2B 2A 01 02 01 00 05 10")),
+        )
+    }
+
     private fun hex(value: String): ByteArray {
         val compact = value.filterNot(Char::isWhitespace)
         return ByteArray(compact.length / 2) { index ->

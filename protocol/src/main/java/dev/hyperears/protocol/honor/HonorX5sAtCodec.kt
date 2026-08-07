@@ -39,6 +39,29 @@ object HonorX5sAtCodec {
     fun isHuaweiBattery(line: String): Boolean =
         line.trim().startsWith(AT_PREFIX)
 
+    /** Captured vendor battery query sent on the SPP channel. */
+    val queryBattery: ByteArray = hex("5A 00 09 00 01 08 01 00 02 00 03 00 FB B9")
+
+    /**
+     * Decodes an SPP battery report frame
+     * `5A 00 10 00 01 27/08 01 01 <case> 02 03 <left> <right> <case> 03 03 <left> <right> 00 <crc>`.
+     * The frame is both pushed by the earphone (command 0x27) and returned for the query (0x08);
+     * the checksum is opaque and not validated.
+     */
+    fun parseBatteryFrame(bytes: ByteArray): BatteryState? {
+        if (bytes.size != BATTERY_FRAME_SIZE) return null
+        if (bytes[0] != 0x5A.toByte() || bytes[1] != 0x00.toByte()) return null
+        if (bytes[4] != 0x01.toByte()) return null
+        val command = bytes[5].unsigned()
+        if (command != 0x27 && command != 0x08) return null
+        if (bytes[6] != 0x01.toByte() || bytes[7] != 0x01.toByte()) return null
+        if (bytes[9] != 0x02.toByte() || bytes[10] != 0x03.toByte()) return null
+        val case = bytes[8].unsigned().percentOrNull() ?: return null
+        val left = bytes[11].unsigned().percentOrNull() ?: return null
+        val right = bytes[12].unsigned().percentOrNull() ?: return null
+        return BatteryState(left, right, case)
+    }
+
     fun parseHuaweiBattery(line: String): BatteryState? {
         val trimmed = line.trim()
         if (!trimmed.startsWith(AT_PREFIX)) return null
@@ -109,6 +132,8 @@ object HonorX5sAtCodec {
 
     private fun Byte.unsigned(): Int = toInt() and 0xFF
 
+    private fun Int.percentOrNull(): Int? = takeIf { it in 0..100 }
+
     private fun hex(value: String): ByteArray {
         val compact = value.filterNot(Char::isWhitespace)
         return ByteArray(compact.length / 2) { index ->
@@ -125,6 +150,7 @@ object HonorX5sAtCodec {
     private const val STATE_FRAME_X_OFFSET = 8
     private const val STATE_FRAME_Y_OFFSET = 9
     private const val ANC_MARKER = 0x01
+    private const val BATTERY_FRAME_SIZE = 21
 
     private val STATE_FRAME_PREFIX = hex("5A 00 07 00 2B 2A 01 02")
     private val HEARTBEAT_FRAME = hex("5A 00 05 00 2B 79 01 00 45 E0")
