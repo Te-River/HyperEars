@@ -32,8 +32,9 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
         setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY, NoiseMode.WIND)
     override val miLinkCardPresentationId: MiLinkCardPresentationId = PRESENTATION_ID
 
+    /** Defaults to the vendor app's smart level until the earphone reports its own state. */
     @Volatile
-    private var ancDepth: HonorX5sAtCodec.AncDepth = HonorX5sAtCodec.AncDepth.DEEP
+    private var ancDepth: HonorX5sAtCodec.AncDepth = HonorX5sAtCodec.AncDepth.SMART
 
     /** Next depth in the vendor order smart -> light -> medium -> deep. */
     fun cycleAncDepth(): HonorX5sAtCodec.AncDepth {

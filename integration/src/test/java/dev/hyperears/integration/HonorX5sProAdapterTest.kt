@@ -45,7 +45,11 @@ class HonorX5sProAdapterTest {
         assertTrue(result.accepted)
         assertEquals(1, result.commands.size)
         assertArrayEquals(
-            HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC),
+            // Default depth is smart until the earphone reports its own state.
+            HonorX5sAtCodec.modeCommand(
+                HonorX5sAtCodec.NoiseMode.ANC,
+                HonorX5sAtCodec.AncDepth.SMART,
+            ),
             result.commands[0],
         )
         assertTrue(result.stateChanged)
@@ -63,7 +67,13 @@ class HonorX5sProAdapterTest {
             assertTrue("$mode rejected", result.accepted)
             assertArrayEquals(
                 "captured command for $mode",
-                HonorX5sAtCodec.modeCommand(wireMode),
+                when (mode) {
+                    NoiseMode.ANC -> HonorX5sAtCodec.modeCommand(
+                        wireMode,
+                        HonorX5sAtCodec.AncDepth.SMART,
+                    )
+                    else -> HonorX5sAtCodec.modeCommand(wireMode)
+                },
                 result.commands[0],
             )
         }
@@ -124,6 +134,25 @@ class HonorX5sProAdapterTest {
             ),
             result.commands[0],
         )
+    }
+
+    @Test
+    fun windCyclesAncDepthAndReissuesAncCommand() {
+        // Default depth is smart (0x01); cycles follow the vendor order light -> medium -> deep.
+        val expected = listOf(
+            HonorX5sAtCodec.AncDepth.LIGHT,
+            HonorX5sAtCodec.AncDepth.MEDIUM,
+            HonorX5sAtCodec.AncDepth.DEEP,
+            HonorX5sAtCodec.AncDepth.SMART,
+        )
+        expected.forEach { depth ->
+            val result = adapter.executeControl(ControlRequest.SetNoiseMode(NoiseMode.WIND))
+            assertTrue(result.accepted)
+            assertArrayEquals(
+                HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC, depth),
+                result.commands[0],
+            )
+        }
     }
 
     @Test
