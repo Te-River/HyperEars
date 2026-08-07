@@ -203,14 +203,6 @@ data class L2capEndpointSpec(
 }
 
 /**
- * One per-mode GATT write target; UUID is authoritative, instanceId is optional.
- */
-data class GattWriteTarget(
-    val characteristicUuid: String,
-    val instanceId: Int? = null,
-)
-
-/**
  * BLE GATT transport whose characteristics carry the protocol's unmodified business frames.
  *
  * UUIDs are authoritative. Optional instance IDs pin a captured attribute table when a device
@@ -223,13 +215,6 @@ data class GattTransportSpec(
     val notifyCharacteristicUuid: String,
     val writeInstanceId: Int? = null,
     val notifyInstanceId: Int? = null,
-    /**
-     * Per-mode write targets for devices whose noise modes live on distinct characteristics.
-     *
-     * The default write characteristic remains the fallback target; runtimes resolve every
-     * declared target during service discovery and validate writable properties.
-     */
-    val modeWriteTargets: Map<NoiseMode, GattWriteTarget> = emptyMap(),
     override val id: String,
 ) : EarbudTransportSpec {
     init {
@@ -303,21 +288,11 @@ data class AdapterIoResult(
     val unknownFrames: List<ProtocolEvent.UnknownFrame> = emptyList(),
 )
 
-/** A protocol output frame optionally routed to a named transport target. */
-data class TargetedCommand(
-    val bytes: ByteArray,
-    val targetId: String? = null,
-)
-
 data class AdapterControlResult(
     val accepted: Boolean,
     val commands: List<ByteArray> = emptyList(),
     val readback: List<ByteArray> = emptyList(),
     val stateChanged: Boolean = false,
-    /**
-     * Present only when the session is a [TargetedProtocolSession]; empty for classic sessions.
-     */
-    val targetedCommands: List<TargetedCommand> = emptyList(),
 )
 
 /**
@@ -373,14 +348,4 @@ interface ProtocolSession {
 
     fun offer(bytes: ByteArray): List<ProtocolEvent>
     fun reset()
-}
-
-/**
- * Optional capability: protocol sessions that route output frames to distinct transport targets.
- *
- * Classic sessions keep the empty default; [AdapterControlResult.targetedCommands] stays empty
- * and the runtime falls back to [ProtocolSession.encode] on the default write target.
- */
-interface TargetedProtocolSession : ProtocolSession {
-    fun encodeTargeted(request: ControlRequest): List<TargetedCommand> = emptyList()
 }

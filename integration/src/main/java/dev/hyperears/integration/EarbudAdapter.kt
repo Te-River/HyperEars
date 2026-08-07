@@ -204,10 +204,7 @@ abstract class EarbudAdapter(
             return AdapterControlResult(accepted = request === ControlRequest.Refresh)
         }
         val commands = protocolSession.encode(request)
-        val targetedCommands = (protocolSession as? TargetedProtocolSession)
-            ?.encodeTargeted(request)
-            .orEmpty()
-        if (commands.isEmpty() && targetedCommands.isEmpty() && request !== ControlRequest.Refresh) {
+        if (commands.isEmpty() && request !== ControlRequest.Refresh) {
             return AdapterControlResult(accepted = false)
         }
         var changed = false
@@ -221,7 +218,6 @@ abstract class EarbudAdapter(
         return AdapterControlResult(
             accepted = true,
             commands = commands,
-            targetedCommands = targetedCommands,
             readback = protocolSession.readback(request),
             stateChanged = changed,
         )

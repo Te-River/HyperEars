@@ -7,7 +7,6 @@ import android.content.Context
 import android.os.SystemClock
 import dev.hyperears.hook.ModuleLog
 import dev.hyperears.hook.maskBluetoothAddress
-import dev.hyperears.integration.AdapterControlResult
 import dev.hyperears.integration.ControlRequest
 import dev.hyperears.integration.BatterySource
 import dev.hyperears.integration.AdapterActivation
@@ -40,20 +39,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
-
-/** One ordered channel frame; [targetId] is null for the classic single-target write. */
-internal data class WriteFrame(
-    val bytes: ByteArray,
-    val targetId: String?,
-)
-
-/** Projects one control result into ordered write frames; targeted frames win over classic. */
-internal fun AdapterControlResult.writeFrames(): List<WriteFrame> =
-    if (targetedCommands.isNotEmpty()) {
-        targetedCommands.map { WriteFrame(it.bytes, it.targetId) }
-    } else {
-        commands.map { WriteFrame(it, null) }
-    }
 
 /**
  * One device-scoped private-protocol session.
@@ -205,9 +190,9 @@ internal class EarbudDeviceSession(
                 transactionMutex.withLock {
                     val result = adapter.executeControl(request)
                     if (!result.accepted) return@withLock
-                    sendFrames(
+                    sendCommands(
                         activeChannel = activeChannel,
-                        frames = result.writeFrames(),
+                        commands = result.commands,
                         gapMs = COMMAND_GAP_MS,
                         description = request.description(),
                     )
@@ -215,9 +200,9 @@ internal class EarbudDeviceSession(
                     val readback = result.readback
                     if (readback.isNotEmpty()) {
                         delay(CONTROL_READBACK_DELAY_MS)
-                        sendFrames(
+                        sendCommands(
                             activeChannel = activeChannel,
-                            frames = readback.map { WriteFrame(it, null) },
+                            commands = readback,
                             gapMs = COMMAND_GAP_MS,
                             description = "${request.description()} readback",
                         )
@@ -552,26 +537,6 @@ internal class EarbudDeviceSession(
                 "$description wrote bytes=${command.toHex()}",
             )
             if (index != commands.lastIndex) delay(gapMs)
-        }
-    }
-
-    private suspend fun sendFrames(
-        activeChannel: EarbudChannel,
-        frames: List<WriteFrame>,
-        gapMs: Long,
-        description: String,
-    ) {
-        frames.forEachIndexed { index, frame ->
-            currentCoroutineContext().ensureActive()
-            if (closed.get() || channel !== activeChannel) {
-                throw CancellationException("stale vendor-channel writer")
-            }
-            activeChannel.write(frame.bytes, frame.targetId)
-            ModuleLog.debug(
-                COMPONENT,
-                "$description wrote bytes=${frame.bytes.toHex()} target=${frame.targetId}",
-            )
-            if (index != frames.lastIndex) delay(gapMs)
         }
     }
 
