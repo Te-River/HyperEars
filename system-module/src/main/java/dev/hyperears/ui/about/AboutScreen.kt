@@ -384,6 +384,20 @@ private val supportBrands = listOf(
         ),
     ),
     SupportBrand(
+        name = "荣耀",
+        entries = listOf(
+            SupportEntry(
+                name = "荣耀亲选耳机 X5s Pro",
+                scope = SupportScope.MODEL,
+                evidence = EvidenceLevel.PUBLIC_IMPLEMENTATION,
+                matchAndConfirmation = "规范化型号匹配",
+                privateTransport = "RFCOMM SPP 私有帧",
+                battery = "HFP AT 私有组件",
+                noiseControl = "降噪、关闭、通透",
+            ),
+        ),
+    ),
+    SupportBrand(
         name = "通用蓝牙耳机",
         entries = listOf(
             SupportEntry(
