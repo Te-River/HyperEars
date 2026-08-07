@@ -9,7 +9,7 @@ class HookEntry : XposedModule() {
         if (!param.isFirstPackage) return
 
         val hooks = when (param.packageName) {
-            "com.android.bluetooth" -> listOf(BluetoothProcessHook())
+            "com.android.bluetooth" -> listOf(BluetoothProcessHook(), HfpBatteryHook())
 
             "com.milink.service" -> {
                 val processName = Application.getProcessName()

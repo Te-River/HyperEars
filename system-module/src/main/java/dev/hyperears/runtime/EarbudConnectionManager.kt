@@ -162,6 +162,16 @@ internal class EarbudConnectionManager(
         return true
     }
 
+    /** Routes one out-of-band HFP AT report to the matching device session. */
+    fun onHfpAtReport(device: BluetoothDevice, atBytes: ByteArray): Boolean {
+        val address = runCatching { device.address }.getOrNull() ?: return false
+        val session = synchronized(lifecycleLock) {
+            sessions[normalizeAddress(address)]?.session
+        } ?: return false
+        session.onVendorReport(atBytes)
+        return true
+    }
+
     fun execute(
         request: ControlRequest,
         address: String,

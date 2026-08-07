@@ -47,6 +47,10 @@ internal object EarbudSessionService {
     fun unregisterDevice(device: BluetoothDevice?): Boolean =
         runtime?.connectionManager?.unregisterDevice(device) == true
 
+    /** Forwards one out-of-band HFP AT report (e.g. HUAWEIBATTERY) to the device session. */
+    fun onHfpAtReport(device: BluetoothDevice, atBytes: ByteArray): Boolean =
+        runtime?.connectionManager?.onHfpAtReport(device, atBytes) == true
+
     fun disconnectAllDevices() {
         runtime?.connectionManager?.unregisterDevice(null)
     }
