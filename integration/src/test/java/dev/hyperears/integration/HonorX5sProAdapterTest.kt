@@ -32,7 +32,9 @@ class HonorX5sProAdapterTest {
         )
         assertTrue(adapter.effectiveCapabilities().battery)
         assertTrue(adapter.effectiveCapabilities().noiseControl)
-        assertEquals(BatterySource.PRIVATE_PROTOCOL, adapter.effectiveBatterySource())
+        // System parses the standard HFP IPHONEACCEV report into RemoteDevices; component-level
+        // HUAWEIBATTERY values are consumed by the vendor app's private channel and stay unavailable.
+        assertEquals(BatterySource.SYSTEM_AGGREGATE, adapter.effectiveBatterySource())
         val transport = adapter.transports.single() as RfcommEndpointSpec.ServiceUuid
         assertEquals(HonorX5sProAdapter.SPP_UUID, transport.uuid)
     }

@@ -16,7 +16,7 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
     override val displayName: String = "荣耀亲选耳机 X5s Pro"
     override val resolution: AdapterResolution = AdapterResolution.EXACT_MATCH
     override val privateProtocolRequired: Boolean = true
-    override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
+    override val batterySource: BatterySource = BatterySource.SYSTEM_AGGREGATE
     override val noiseControlConfirmation: ControlConfirmationPolicy =
         ControlConfirmationPolicy.PUBLISH_AFTER_WRITE
     override val capabilities: EarbudCapabilities = EarbudCapabilities(
