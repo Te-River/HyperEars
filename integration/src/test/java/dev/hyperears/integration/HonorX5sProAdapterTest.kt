@@ -33,9 +33,8 @@ class HonorX5sProAdapterTest {
         )
         assertTrue(adapter.effectiveCapabilities().battery)
         assertTrue(adapter.effectiveCapabilities().noiseControl)
-        // System parses the standard HFP IPHONEACCEV report into RemoteDevices; component-level
-        // HUAWEIBATTERY values are consumed by the vendor app's private channel and stay unavailable.
-        assertEquals(BatterySource.SYSTEM_AGGREGATE, adapter.effectiveBatterySource())
+        // SPP battery report frames carry component levels; the system HFP aggregate is a fallback.
+        assertEquals(BatterySource.PRIVATE_PROTOCOL, adapter.effectiveBatterySource())
         val transport = adapter.transports.single() as RfcommEndpointSpec.ServiceUuid
         assertEquals(HonorX5sProAdapter.SPP_UUID, transport.uuid)
     }
@@ -68,6 +67,23 @@ class HonorX5sProAdapterTest {
                 result.commands[0],
             )
         }
+    }
+
+    @Test
+    fun sppBatteryReportProducesComponentBattery() {
+        val result = adapter.receive(hex("5A 00 10 00 01 27 01 01 47 02 03 64 64 47 03 03 64 64 00 EF 9F"))
+        val battery = adapter.runtimeState().battery
+        assertEquals(100, battery.left.percent)
+        assertEquals(100, battery.right.percent)
+        assertEquals(71, battery.case.percent)
+        assertTrue(result.stateChanged)
+    }
+
+    @Test
+    fun refreshEncodesBatteryQuery() {
+        val result = adapter.executeControl(ControlRequest.Refresh)
+        assertTrue(result.accepted)
+        assertArrayEquals(HonorX5sAtCodec.queryBattery, result.commands[0])
     }
 
     @Test

@@ -20,7 +20,7 @@ class HonorX5sProAdapter : StandardEarbudAdapter() {
     override val displayName: String = "荣耀亲选耳机 X5s Pro"
     override val resolution: AdapterResolution = AdapterResolution.EXACT_MATCH
     override val privateProtocolRequired: Boolean = true
-    override val batterySource: BatterySource = BatterySource.SYSTEM_AGGREGATE
+    override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
     override val noiseControlConfirmation: ControlConfirmationPolicy =
         ControlConfirmationPolicy.PUBLISH_AFTER_WRITE
     override val capabilities: EarbudCapabilities = EarbudCapabilities(
@@ -77,10 +77,10 @@ private class HonorX5sProProtocolSession(
     private val onWindCycle: () -> Unit,
 ) : ProtocolSession {
 
-    override fun initialReadCommands(): List<ByteArray> = emptyList()
+    override fun initialReadCommands(): List<ByteArray> = listOf(HonorX5sAtCodec.queryBattery)
 
     override fun encode(request: ControlRequest): List<ByteArray> = when (request) {
-        ControlRequest.Refresh -> emptyList()
+        ControlRequest.Refresh -> listOf(HonorX5sAtCodec.queryBattery)
         is ControlRequest.SetNoiseMode -> if (request.mode == NoiseMode.WIND) {
             // The card extension cycles ANC depth through the vendor's non-physical WIND mode;
             // the encoded frame is always ANC with the freshly selected depth.
@@ -95,6 +95,19 @@ private class HonorX5sProProtocolSession(
 
     override fun offer(bytes: ByteArray): List<ProtocolEvent> = buildList {
         if (HonorX5sAtCodec.isHeartbeat(bytes)) return@buildList
+        HonorX5sAtCodec.parseBatteryFrame(bytes)?.let { battery ->
+            add(ProtocolEvent.CapabilitiesIdentified(battery = true))
+            add(
+                ProtocolEvent.BatteryChanged(
+                    EarbudBattery(
+                        left = BatteryReading(battery.leftPercent, charging = false),
+                        right = BatteryReading(battery.rightPercent, charging = false),
+                        case = BatteryReading(battery.casePercent, charging = false),
+                    ),
+                ),
+            )
+            return@buildList
+        }
         HonorX5sAtCodec.parseHuaweiBattery(String(bytes, Charsets.US_ASCII))?.let { battery ->
             add(ProtocolEvent.CapabilitiesIdentified(battery = true))
             add(
