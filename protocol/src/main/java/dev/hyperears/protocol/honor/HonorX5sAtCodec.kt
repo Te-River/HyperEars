@@ -5,9 +5,9 @@ package dev.hyperears.protocol.honor
  *
  * Battery telemetry arrives over the system HFP channel as the AT line
  * `AT+HUAWEIBATTERY=<pair_count>,<idx1>,<val1>,...` where indices 2, 4 and 6
- * carry the left bud, right bud and charging case. Noise modes are written as
- * fixed payloads to three distinct BLE GATT characteristics; the payload table
- * is captured from the device and stays versioned with this codec.
+ * carry the left bud, right bud and charging case. Noise modes are controlled
+ * through the device's private RFCOMM SPP channel with `5A 00` framed commands
+ * captured from the vendor app; the command and state frames stay versioned here.
  */
 object HonorX5sAtCodec {
     enum class NoiseMode {
@@ -50,18 +50,32 @@ object HonorX5sAtCodec {
         return BatteryState(left, right, case)
     }
 
-    fun modePayload(mode: NoiseMode): ByteArray = when (mode) {
-        NoiseMode.ANC -> ANC_PAYLOAD
-        NoiseMode.TRANSPARENCY -> TRANSPARENCY_PAYLOAD
-        NoiseMode.OFF -> NORMAL_PAYLOAD
+    /** Captured vendor ANC-set command frame for each mode. */
+    fun modeCommand(mode: NoiseMode): ByteArray = when (mode) {
+        NoiseMode.ANC -> hex("5A 00 07 00 2B 04 01 02 01 00 E1 1C")
+        NoiseMode.TRANSPARENCY -> hex("5A 00 07 00 2B 04 01 02 02 00 B4 4F")
+        NoiseMode.OFF -> hex("5A 00 07 00 2B 04 01 02 00 00 D2 2D")
     }
 
-    fun noiseModeForPayload(bytes: ByteArray): NoiseMode? = when {
-        bytes.contentEquals(ANC_PAYLOAD) -> NoiseMode.ANC
-        bytes.contentEquals(TRANSPARENCY_PAYLOAD) -> NoiseMode.TRANSPARENCY
-        bytes.contentEquals(NORMAL_PAYLOAD) -> NoiseMode.OFF
-        else -> null
+    /**
+     * Decodes the earphone's mode-state frame `5A 00 07 00 2B 2A 01 02 00 <mode> <crc>`.
+     * The trailing checksum is opaque and not validated; the mode byte is authoritative.
+     */
+    fun modeFromStateFrame(bytes: ByteArray): NoiseMode? {
+        if (bytes.size != STATE_FRAME_SIZE) return null
+        if (!bytes.copyOfRange(0, STATE_FRAME_PREFIX_SIZE).contentEquals(STATE_FRAME_PREFIX)) {
+            return null
+        }
+        return when (bytes[STATE_FRAME_MODE_OFFSET]) {
+            0x01.toByte() -> NoiseMode.ANC
+            0x02.toByte() -> NoiseMode.TRANSPARENCY
+            0x00.toByte() -> NoiseMode.OFF
+            else -> null
+        }
     }
+
+    /** 3-second vendor keepalive; must not be surfaced as an unknown frame. */
+    fun isHeartbeat(bytes: ByteArray): Boolean = bytes.contentEquals(HEARTBEAT_FRAME)
 
     private fun hex(value: String): ByteArray {
         val compact = value.filterNot(Char::isWhitespace)
@@ -74,9 +88,10 @@ object HonorX5sAtCodec {
     private const val INDEX_LEFT = 2
     private const val INDEX_RIGHT = 4
     private const val INDEX_CASE = 6
+    private const val STATE_FRAME_SIZE = 12
+    private const val STATE_FRAME_PREFIX_SIZE = 9
+    private const val STATE_FRAME_MODE_OFFSET = 9
 
-    private val ANC_PAYLOAD =
-        hex("00 9c 00 b5 f3 64 31 4f 2e 91 82 74 4e 1b ef 01 00 3e e7")
-    private val TRANSPARENCY_PAYLOAD = hex("00 ff ff aa fd")
-    private val NORMAL_PAYLOAD = hex("00 09 00 01 18 14 00 1d 00 00 18 28 00 2d 00 c0 fc")
+    private val STATE_FRAME_PREFIX = hex("5A 00 07 00 2B 2A 01 02 00")
+    private val HEARTBEAT_FRAME = hex("5A 00 05 00 2B 79 01 00 45 E0")
 }

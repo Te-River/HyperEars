@@ -1,7 +1,9 @@
 package dev.hyperears.protocol.honor
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HonorX5sAtCodecTest {
@@ -18,13 +20,13 @@ class HonorX5sAtCodecTest {
 
     @Test
     fun ignoresPlaceholderIndices() {
-        // Single-bud connection still reports left/right; other indices are placeholders.
+        // Vendor frames carry placeholder pairs (idx 3/5/7 = 0) between the real values.
         val state = HonorX5sAtCodec.parseHuaweiBattery(
-            "AT+HUAWEIBATTERY=1,2,100,3,0,5,0,7,0",
+            "AT+HUAWEIBATTERY=6,2,100,3,0,4,100,5,0,6,71,7,0",
         )!!
         assertEquals(100, state.leftPercent)
-        assertEquals(null, state.rightPercent)
-        assertEquals(null, state.casePercent)
+        assertEquals(100, state.rightPercent)
+        assertEquals(71, state.casePercent)
     }
 
     @Test
@@ -41,45 +43,51 @@ class HonorX5sAtCodecTest {
     }
 
     @Test
-    fun exposesTheThreeModePayloads() {
-        assertEquals(19, HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.ANC).size)
-        assertEquals(5, HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.TRANSPARENCY).size)
-        assertEquals(17, HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.OFF).size)
+    fun modeCommandsMatchCapturedVendorFrames() {
         assertEquals(
-            "00 9C 00 B5 F3 64 31 4F 2E 91 82 74 4E 1B EF 01 00 3E E7",
-            HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.ANC).hex(),
+            "5A 00 07 00 2B 04 01 02 01 00 E1 1C",
+            HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.ANC).hex(),
         )
         assertEquals(
-            "00 FF FF AA FD",
-            HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.TRANSPARENCY).hex(),
+            "5A 00 07 00 2B 04 01 02 02 00 B4 4F",
+            HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.TRANSPARENCY).hex(),
         )
         assertEquals(
-            "00 09 00 01 18 14 00 1D 00 00 18 28 00 2D 00 C0 FC",
-            HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.OFF).hex(),
+            "5A 00 07 00 2B 04 01 02 00 00 D2 2D",
+            HonorX5sAtCodec.modeCommand(HonorX5sAtCodec.NoiseMode.OFF).hex(),
         )
     }
 
     @Test
-    fun matchesNotificationPayloadBackToMode() {
+    fun stateFramesDecodeBackToModes() {
         assertEquals(
             HonorX5sAtCodec.NoiseMode.ANC,
-            HonorX5sAtCodec.noiseModeForPayload(
-                HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.ANC),
-            ),
+            HonorX5sAtCodec.modeFromStateFrame(hex("5A 00 07 00 2B 2A 01 02 00 01 05 10")),
         )
         assertEquals(
             HonorX5sAtCodec.NoiseMode.TRANSPARENCY,
-            HonorX5sAtCodec.noiseModeForPayload(
-                HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.TRANSPARENCY),
-            ),
+            HonorX5sAtCodec.modeFromStateFrame(hex("5A 00 07 00 2B 2A 01 02 00 02 35 73")),
         )
         assertEquals(
             HonorX5sAtCodec.NoiseMode.OFF,
-            HonorX5sAtCodec.noiseModeForPayload(
-                HonorX5sAtCodec.modePayload(HonorX5sAtCodec.NoiseMode.OFF),
-            ),
+            HonorX5sAtCodec.modeFromStateFrame(hex("5A 00 07 00 2B 2A 01 02 00 00 15 31")),
         )
-        assertNull(HonorX5sAtCodec.noiseModeForPayload(byteArrayOf(0x00, 0x61, 0x01)))
+        assertNull(HonorX5sAtCodec.modeFromStateFrame(hex("5A 00 05 00 2B 79 01 00 45 E0")))
+        assertNull(HonorX5sAtCodec.modeFromStateFrame(byteArrayOf(1, 2, 3)))
+    }
+
+    @Test
+    fun heartbeatFramesAreRecognized() {
+        assertTrue(HonorX5sAtCodec.isHeartbeat(hex("5A 00 05 00 2B 79 01 00 45 E0")))
+        assertFalse(HonorX5sAtCodec.isHeartbeat(hex("5A 00 07 00 2B 04 01 02 01 00 E1 1C")))
+        assertFalse(HonorX5sAtCodec.isHeartbeat(byteArrayOf(1, 2, 3)))
+    }
+
+    private fun hex(value: String): ByteArray {
+        val compact = value.filterNot(Char::isWhitespace)
+        return ByteArray(compact.length / 2) { index ->
+            compact.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
     }
 
     private fun ByteArray.hex(): String =
