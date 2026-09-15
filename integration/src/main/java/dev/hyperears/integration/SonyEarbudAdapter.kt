@@ -7,6 +7,7 @@ import java.util.ArrayDeque
 open class SonyEarbudAdapter : StandardEarbudAdapter() {
     override val id: String = ID
     override val displayName: String = "Sony headset"
+    override val resolution: AdapterResolution = AdapterResolution.FAMILY_MATCH
     override val controlApps: List<ControlAppSpec> = listOf(ControlAppCatalog.sonySoundConnect)
 
     override fun matches(identity: EarbudIdentity): Boolean =
@@ -30,6 +31,8 @@ internal enum class SonyAmbientDialect {
     WIND,
     EXTENDED,
     AMBIENT_ONLY,
+    /** 2026-generation three-state control; v2 ambient frames use subtype 0x19. */
+    MODERN,
     ;
 
     val supportsControl: Boolean get() = this != NONE
@@ -45,17 +48,23 @@ internal data class SonyAdapterConfig(
     val batteryKinds: List<SonyBatteryKind>,
     val ambientDialect: SonyAmbientDialect,
     val preferServiceV2: Boolean = false,
+    /** Model-confirmed init retries triggered only by a pre-handshake device command. */
+    val preHandshakeInitRetryLimit: Int = 0,
     val exactName: Boolean = false,
     val miLinkPresentationId: MiLinkCardPresentationId? = null,
-    val capabilitiesPreverified: Boolean = true,
-)
+    val resolution: AdapterResolution = AdapterResolution.EXACT_MATCH,
+) {
+    init {
+        require(preHandshakeInitRetryLimit in 0..2)
+    }
+}
 
 /**
  * Sony's common private-protocol layer.
  *
  * It owns the RFCOMM endpoints and the ACK-driven v1/v2 protocol, while immutable configurations only
- * declare product differences. A valid init reply is required before private capabilities are
- * published.
+ * declare product differences. Model identity selects a safe probe configuration; valid feature
+ * reports remain the only authority that publishes private capabilities.
  */
 open class SonyProtocolFamilyAdapter internal constructor(
     private val configuration: SonyAdapterConfig,
@@ -64,37 +73,19 @@ open class SonyProtocolFamilyAdapter internal constructor(
     final override val id: String = configuration.id
     final override val displayName: String = configuration.displayName
     final override val formFactor: HeadsetFormFactor = configuration.formFactor
-    final override val miLinkCardPresentationId: MiLinkCardPresentationId? =
-        configuration.miLinkPresentationId
+    final override val miLinkCardPresentationId: MiLinkCardPresentationId?
+        get() = configuration.miLinkPresentationId.takeIf {
+            effectiveCapabilities().noiseControl
+        }
     final override val privateProtocolRequired: Boolean = true
     final override val transportReadiness: TransportReadiness =
         TransportReadiness.PROTOCOL_HANDSHAKE
-    final override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
     final override val capabilities: EarbudCapabilities = EarbudCapabilities(
-        battery = configuration.capabilitiesPreverified,
-        noiseControl = configuration.capabilitiesPreverified &&
-            configuration.ambientDialect.supportsControl,
-        windNoiseControl = configuration.capabilitiesPreverified &&
-            configuration.ambientDialect.supportsWind,
+        battery = true,
         audioHandoff = true,
     )
-    final override val supportedNoiseModes: Set<NoiseMode> = buildSet {
-        if (configuration.capabilitiesPreverified &&
-            configuration.ambientDialect.supportsNoiseCancelling
-        ) add(NoiseMode.ANC)
-        if (configuration.capabilitiesPreverified && configuration.ambientDialect.supportsControl) {
-            add(NoiseMode.OFF)
-            add(NoiseMode.TRANSPARENCY)
-        }
-        if (configuration.capabilitiesPreverified && configuration.ambientDialect.supportsWind) {
-            add(NoiseMode.WIND)
-        }
-    }
-    final override val resolution: AdapterResolution = if (configuration.capabilitiesPreverified) {
-        AdapterResolution.EXACT_MATCH
-    } else {
-        AdapterResolution.FAMILY_MATCH
-    }
+    final override val supportedNoiseModes: Set<NoiseMode> = emptySet()
+    final override val resolution: AdapterResolution = configuration.resolution
     final override val transports: List<EarbudTransportSpec> =
         if (configuration.preferServiceV2) SONY_V2_FIRST_TRANSPORTS else SONY_V1_FIRST_TRANSPORTS
 
@@ -124,7 +115,13 @@ object SonyAdapterRegistry {
     private val modelConfigs = listOf(
         sonyHeadphones("wh-1000xm2", "Sony WH-1000XM2", "wh1000xm2", ambient = SonyAmbientDialect.WIND),
         sonyHeadphones("wh-1000xm3", "Sony WH-1000XM3", "wh1000xm3", ambient = SonyAmbientDialect.WIND),
-        sonyHeadphones("wh-1000xm4", "Sony WH-1000XM4", "wh1000xm4", ambient = SonyAmbientDialect.WIND),
+        sonyHeadphones(
+            id = "wh-1000xm4",
+            displayName = "Sony WH-1000XM4",
+            marker = "wh1000xm4",
+            ambient = SonyAmbientDialect.WIND,
+            preHandshakeInitRetryLimit = 1,
+        ),
         sonyHeadphones("wh-1000xm5", "Sony WH-1000XM5", "wh1000xm5", ambient = SonyAmbientDialect.STANDARD),
         sonyHeadphones("wh-1000xm6", "Sony WH-1000XM6", "wh1000xm6", ambient = SonyAmbientDialect.STANDARD),
         sonyHeadphones("wh-ch720n", "Sony WH-CH720N", "whch720n", ambient = SonyAmbientDialect.STANDARD),
@@ -138,6 +135,14 @@ object SonyAdapterRegistry {
         sonyTw("wf-1000xm3", "Sony WF-1000XM3", "wf1000xm3", SonyBatteryKind.DUAL, SonyAmbientDialect.WIND),
         sonyTw("wf-1000xm4", "Sony WF-1000XM4", "wf1000xm4", SonyBatteryKind.DUAL, SonyAmbientDialect.WIND),
         sonyTw("wf-1000xm5", "Sony WF-1000XM5", "wf1000xm5", SonyBatteryKind.DUAL, SonyAmbientDialect.STANDARD),
+        sonyTw(
+            id = "wf-1000xm6",
+            displayName = "Sony WF-1000XM6",
+            marker = "wf1000xm6",
+            battery = SonyBatteryKind.DUAL,
+            ambient = SonyAmbientDialect.MODERN,
+            preferServiceV2 = true,
+        ),
         sonyTw("wf-c500", "Sony WF-C500", "wfc500", SonyBatteryKind.DUAL2, SonyAmbientDialect.NONE, hasCase = false),
         sonyTw(
             id = "wf-c510",
@@ -182,7 +187,7 @@ object SonyAdapterRegistry {
         formFactor = HeadsetFormFactor.HEADPHONES,
         batteryKinds = listOf(SonyBatteryKind.SINGLE),
         ambientDialect = SonyAmbientDialect.STANDARD,
-        capabilitiesPreverified = false,
+        resolution = AdapterResolution.FAMILY_MATCH,
     )
 
     private val headphonesBatteryFamilyConfig = SonyAdapterConfig(
@@ -192,7 +197,7 @@ object SonyAdapterRegistry {
         formFactor = HeadsetFormFactor.HEADPHONES,
         batteryKinds = listOf(SonyBatteryKind.SINGLE),
         ambientDialect = SonyAmbientDialect.NONE,
-        capabilitiesPreverified = false,
+        resolution = AdapterResolution.FAMILY_MATCH,
     )
 
     private val twsNoiseFamilyConfig = SonyAdapterConfig(
@@ -202,7 +207,7 @@ object SonyAdapterRegistry {
         formFactor = HeadsetFormFactor.TWS,
         batteryKinds = listOf(SonyBatteryKind.DUAL, SonyBatteryKind.DUAL2, SonyBatteryKind.CASE),
         ambientDialect = SonyAmbientDialect.STANDARD,
-        capabilitiesPreverified = false,
+        resolution = AdapterResolution.FAMILY_MATCH,
     )
 
     private val twsBatteryFamilyConfig = SonyAdapterConfig(
@@ -212,7 +217,7 @@ object SonyAdapterRegistry {
         formFactor = HeadsetFormFactor.TWS,
         batteryKinds = listOf(SonyBatteryKind.DUAL, SonyBatteryKind.DUAL2, SonyBatteryKind.CASE),
         ambientDialect = SonyAmbientDialect.NONE,
-        capabilitiesPreverified = false,
+        resolution = AdapterResolution.FAMILY_MATCH,
     )
 
     val factories: List<() -> EarbudAdapter> = buildList {
@@ -269,13 +274,14 @@ private class SonyHeadphonesProtocolSession(
     private var version: Version? = null
     private var sequence = 0
     private var awaitingAck = false
+    private var preHandshakeInitRetryCount = 0
     private var battery = EarbudBattery()
 
     @Synchronized
     override fun initialReadCommands(): List<ByteArray> {
         resetState()
         awaitingAck = true
-        return listOf(command(byteArrayOf(0x00, 0x00)))
+        return listOf(initCommand())
     }
 
     @Synchronized
@@ -333,6 +339,17 @@ private class SonyHeadphonesProtocolSession(
             // The init reply identifies Sony's transport dialect only. Capabilities are
             // published later from the corresponding valid state response.
             return listOf(ProtocolEvent.HandshakeAccepted)
+        }
+        if (version == null) {
+            // Some WH-1000XM4 firmware talks before answering the first init request. The exact
+            // model configuration permits one evidence-triggered retry; other Sony models keep
+            // the default zero-retry behavior and the common session timeout remains unchanged.
+            if (preHandshakeInitRetryCount < configuration.preHandshakeInitRetryLimit) {
+                preHandshakeInitRetryCount += 1
+                awaitingAck = true
+                immediateCommands += initCommand()
+            }
+            return emptyList()
         }
 
         val activeVersion = version ?: return emptyList()
@@ -419,6 +436,8 @@ private class SonyHeadphonesProtocolSession(
         payload = payload,
     )
 
+    private fun initCommand(): ByteArray = command(byteArrayOf(0x00, 0x00))
+
     private fun parseBattery(version: Version, payload: ByteArray): EarbudBattery? {
         val code = payload[0].toInt() and 0xFF
         val validCode = if (version == Version.V1) {
@@ -471,8 +490,21 @@ private class SonyHeadphonesProtocolSession(
     }
 
     private fun parseAmbientV2(payload: ByteArray): NoiseMode? {
-        if (payload.size !in 6..8) return null
+        if (payload.size < 6) return null
         val subtype = payload[1].toInt() and 0xFF
+        if (configuration.ambientDialect == SonyAmbientDialect.MODERN) {
+            // 2026-generation notify: on/off at [3], ANC vs transparency at [4].
+            if (subtype != MODERN_AMBIENT_SUBTYPE.toInt() || payload.size != 9) return null
+            if (payload[3].toInt() == 0) return NoiseMode.OFF
+            if (payload[3].toInt() != 1) return null
+            return when (payload[4].toInt() and 0xFF) {
+                0 -> NoiseMode.ANC
+                1 -> NoiseMode.TRANSPARENCY
+                else -> null
+            }
+        }
+        if (subtype == MODERN_AMBIENT_SUBTYPE.toInt()) return null
+        if (payload.size !in 6..8) return null
         if (subtype !in setOf(0x15, 0x17, 0x22)) return null
         if (payload[3].toInt() == 0) return NoiseMode.OFF
         if (payload[3].toInt() != 1) return null
@@ -507,21 +539,40 @@ private class SonyHeadphonesProtocolSession(
         )
     }
 
-    private fun encodeAmbientV2(mode: NoiseMode): ByteArray = buildList<Byte> {
-        add(AMBIENT_SET)
-        add(ambientSubtype(Version.V2))
-        add(0x01)
-        add(if (mode == NoiseMode.OFF) 0x00 else 0x01)
-        add(if (mode == NoiseMode.TRANSPARENCY) 0x01 else 0x00)
-        if (configuration.ambientDialect.supportsWind) {
-            add(if (mode == NoiseMode.WIND) 0x03 else 0x02)
+    private fun encodeAmbientV2(mode: NoiseMode): ByteArray {
+        if (configuration.ambientDialect == SonyAmbientDialect.MODERN) {
+            // Captured Sound Connect traffic uses 0x01 at the third byte: the mode-change
+            // confirmation chime flag. 0x00 would be silent (slider drag), matching the
+            // legacy 0x15 "0x00 while dragging" convention.
+            return byteArrayOf(
+                AMBIENT_SET,
+                MODERN_AMBIENT_SUBTYPE,
+                0x01,
+                if (mode == NoiseMode.OFF) 0x00 else 0x01,
+                if (mode == NoiseMode.TRANSPARENCY) 0x01 else 0x00,
+                0x00,
+                DEFAULT_AMBIENT_LEVEL,
+                0x00,
+                0x00,
+            )
         }
-        add(0x00)
-        add(if (mode == NoiseMode.TRANSPARENCY) DEFAULT_AMBIENT_LEVEL else 0x00)
-    }.toByteArray()
+        return buildList<Byte> {
+            add(AMBIENT_SET)
+            add(ambientSubtype(Version.V2))
+            add(0x01)
+            add(if (mode == NoiseMode.OFF) 0x00 else 0x01)
+            add(if (mode == NoiseMode.TRANSPARENCY) 0x01 else 0x00)
+            if (configuration.ambientDialect.supportsWind) {
+                add(if (mode == NoiseMode.WIND) 0x03 else 0x02)
+            }
+            add(0x00)
+            add(if (mode == NoiseMode.TRANSPARENCY) DEFAULT_AMBIENT_LEVEL else 0x00)
+        }.toByteArray()
+    }
 
     private fun ambientSubtype(version: Version): Byte = when {
         version == Version.V1 -> 0x02
+        configuration.ambientDialect == SonyAmbientDialect.MODERN -> MODERN_AMBIENT_SUBTYPE
         configuration.ambientDialect == SonyAmbientDialect.AMBIENT_ONLY -> 0x17
         configuration.ambientDialect == SonyAmbientDialect.EXTENDED ||
             configuration.ambientDialect == SonyAmbientDialect.WIND -> 0x17
@@ -587,6 +638,7 @@ private class SonyHeadphonesProtocolSession(
         version = null
         sequence = 0
         awaitingAck = false
+        preHandshakeInitRetryCount = 0
         battery = EarbudBattery()
     }
 
@@ -604,6 +656,7 @@ private class SonyHeadphonesProtocolSession(
         const val AMBIENT_SET: Byte = 0x68
         const val AMBIENT_NOTIFY = 0x69
         const val DEFAULT_AMBIENT_LEVEL: Byte = 20
+        const val MODERN_AMBIENT_SUBTYPE: Byte = 0x19
 
         fun supportedModes(dialect: SonyAmbientDialect): Set<NoiseMode> = buildSet {
             if (dialect.supportsNoiseCancelling) add(NoiseMode.ANC)
@@ -633,6 +686,7 @@ private fun sonyHeadphones(
     marker: String,
     ambient: SonyAmbientDialect,
     preferServiceV2: Boolean = false,
+    preHandshakeInitRetryLimit: Int = 0,
 ): SonyAdapterConfig = SonyAdapterConfig(
     id = "sony-$id",
     displayName = displayName,
@@ -641,6 +695,7 @@ private fun sonyHeadphones(
     batteryKinds = listOf(SonyBatteryKind.SINGLE),
     ambientDialect = ambient,
     preferServiceV2 = preferServiceV2,
+    preHandshakeInitRetryLimit = preHandshakeInitRetryLimit,
 )
 
 private fun sonyTw(

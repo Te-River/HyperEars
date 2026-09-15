@@ -20,7 +20,7 @@ class EdifierWireCodecTest {
         assertEquals(1, frames.size)
         val battery = EdifierWireCodec.parseBatteryState(frames[0])
         assertNotNull(battery)
-        assertEquals(60, battery!!.wholeUnit)
+        assertEquals(EdifierWireCodec.BatteryState.Aggregate(60), battery)
     }
 
     /** ANC response for NC off: BB EC CC 00 02 B5 A0 CA -> payload B5 A0 -> 10 05 */
@@ -51,16 +51,115 @@ class EdifierWireCodecTest {
         assertEquals(2, anc!!.level)
     }
 
-    /** Evo Pro device-state response: first decrypted byte A6^A5 = 3%. */
+    /** Evo Pro device state decrypts to 03 64 62 00 03 11; byte 0 is not a percentage. */
     @Test
-    fun `parse Evo Pro F2 response gives aggregate battery`() {
+    fun `parse Evo Pro F2 response gives independent ear batteries`() {
         val frame = EdifierWireCodec.Decoder().offer(
             hex("BB EC F2 00 06 A6 C1 C7 A5 A6 B4 CC"),
         ).single()
 
         assertEquals(EdifierWireCodec.CMD_DEVICE_STATE_QUERY, frame.commandIndex)
-        assertEquals(3, EdifierWireCodec.parseBatteryState(frame)?.wholeUnit)
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(
+                leftPercent = 100,
+                rightPercent = 98,
+            ),
+            EdifierWireCodec.parseBatteryState(frame),
+        )
     }
+
+    /** FitClip Ultra: decrypted payload 03 39 06 46 01 11 carries L/R/case and charging state. */
+    @Test
+    fun `parse FitClip Ultra F2 response includes an online charging case`() {
+        val frame = EdifierWireCodec.Decoder().offer(
+            hex("BB EC F2 00 06 A6 9C A3 E3 A4 B4 BF"),
+        ).single()
+
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(
+                leftPercent = 57,
+                rightPercent = 6,
+                casePercent = 70,
+                caseCharging = true,
+            ),
+            EdifierWireCodec.parseBatteryState(frame),
+        )
+    }
+
+    @Test
+    fun `single worn earbud reports percent 0 as not-connected null`() {
+        // Left earbud disconnected (decrypts to 0) should surface as null, right earbud 98%.
+        // payload bytes 1/2 = 0xA5/0xC7 -> decrypt 0x00/0x62 = 0%/98%. Byte 0 metadata=0x03.
+        val frame = EdifierWireCodec.Decoder().offer(
+            hex("BB EC F2 00 06 A6 A5 C7 A5 A6 B4 B0"),
+        ).single()
+
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(
+                leftPercent = null,
+                rightPercent = 98,
+            ),
+            EdifierWireCodec.parseBatteryState(frame),
+        )
+    }
+
+    @Test
+    fun `Evo Pro F2 metadata byte is never accepted as aggregate battery`() {
+        val frame = EdifierWireCodec.Decoder().offer(
+            hex("BB EC F2 00 06 A6 C1 C7 A5 A6 B4 CC"),
+        ).single()
+
+        val battery = EdifierWireCodec.parseBatteryState(frame)
+        assertEquals(100, (battery as EdifierWireCodec.BatteryState.TwsComponents).leftPercent)
+    }
+
+    @Test
+    fun `both unavailable ears preserve a readable case including zero percent`() {
+        listOf(0, 70, 100).forEach { case ->
+            assertEquals(
+                EdifierWireCodec.BatteryState.TwsComponents(null, null, case, true),
+                EdifierWireCodec.parseBatteryState(batteryResponse(0, 0, case, 1)),
+            )
+        }
+    }
+
+    @Test
+    fun `all unavailable components are a valid clearing snapshot`() {
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(null, null),
+            EdifierWireCodec.parseBatteryState(batteryResponse(0, 0, 70, 3)),
+        )
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(98, null),
+            EdifierWireCodec.parseBatteryState(batteryResponse(98, 0, 0, 3)),
+        )
+    }
+
+    @Test
+    fun `invalid ear values are rejected rather than treated as unavailable`() {
+        listOf(101, 127, 255).forEach { invalid ->
+            assertNull(EdifierWireCodec.parseBatteryState(batteryResponse(invalid, 98, 70, 1)))
+            assertNull(EdifierWireCodec.parseBatteryState(batteryResponse(98, invalid, 70, 1)))
+        }
+    }
+
+    @Test
+    fun `aggregate zero remains a real battery level`() {
+        val frame = EdifierWireCodec.Frame(
+            EdifierWireCodec.RECEIVE_HEADER, EdifierWireCodec.APP_CODE,
+            EdifierWireCodec.CMD_BATTERY_QUERY, byteArrayOf(0xA5.toByte()), byteArrayOf(),
+        )
+        assertEquals(EdifierWireCodec.BatteryState.Aggregate(0), EdifierWireCodec.parseBatteryState(frame))
+    }
+
+    private fun batteryResponse(left: Int, right: Int, case: Int, caseState: Int): EdifierWireCodec.Frame =
+        EdifierWireCodec.Frame(
+            EdifierWireCodec.RECEIVE_HEADER,
+            EdifierWireCodec.APP_CODE,
+            EdifierWireCodec.CMD_DEVICE_STATE_QUERY,
+            listOf(3, left, right, case, caseState, 0x11).map { (it xor 0xA5).toByte() }.toByteArray(),
+            byteArrayOf(),
+        )
 
     /** Evo Pro ANC response: BE^A5=1B slot, A3^A5=06 (off). */
     @Test
@@ -72,6 +171,53 @@ class EdifierWireCodecTest {
         val anc = requireNotNull(EdifierWireCodec.parseAncState(frame))
         assertEquals(0x1B, anc.mode)
         assertEquals(6, anc.level)
+    }
+
+    // ── Plaintext payload devices (e.g. FitBuds Turbo) ──
+
+    /** FitBuds Turbo ANC response is PLAINTEXT: BB EC CC 00 02 1B 06 -> slot 0x1B, level 6. */
+    @Test
+    fun `parse plaintext ANC response without XOR gives Evo Pro slot`() {
+        val frame = EdifierWireCodec.Decoder().offer(
+            hex("BB EC CC 00 02 1B 06 96"),
+        ).single()
+
+        // Default path assumes XOR-encrypted -> mangled mode, must NOT resolve to 0x1B.
+        val encrypted = EdifierWireCodec.parseAncState(frame)
+        assertNull(encrypted?.let { if (it.mode == 0x1B) it else null })
+
+        // Plaintext path reads the payload verbatim -> slot 0x1B, level 6 (OFF).
+        val plain = requireNotNull(EdifierWireCodec.parseAncState(frame, encrypted = false))
+        assertEquals(0x1B, plain.mode)
+        assertEquals(6, plain.level)
+    }
+
+    /** FitBuds Turbo F2 battery response is PLAINTEXT: 03 64 64 00 03 11 -> L/R 100%. */
+    @Test
+    fun `parse plaintext F2 response gives independent ear batteries`() {
+        val frame = EdifierWireCodec.Decoder().offer(
+            hex("BB EC F2 00 06 03 64 64 00 03 11 7E"),
+        ).single()
+
+        val plain = requireNotNull(EdifierWireCodec.parseBatteryState(frame, encrypted = false))
+        assertEquals(
+            EdifierWireCodec.BatteryState.TwsComponents(leftPercent = 100, rightPercent = 100),
+            plain,
+        )
+    }
+
+    /** Plaintext set commands must NOT be XOR-obfuscated on the wire. */
+    @Test
+    fun `plaintext ANC set stays unencrypted`() {
+        // EVO_PRO slot 0x1B, deep NC value 1 -> plaintext payload 1B 01. CRC=0x75.
+        val expected = byteArrayOf(
+            0xAA.toByte(), 0xEC.toByte(), 0xC1.toByte(), 0x00.toByte(), 0x02.toByte(),
+            0x1B.toByte(), 0x01.toByte(), 0x75.toByte(),
+        )
+        assertEquals(
+            expected.toHex(),
+            EdifierWireCodec.setAnc(1, ancIndex = 0x1B, encrypt = false).toHex(),
+        )
     }
 
     // ── Send framing ──
@@ -108,6 +254,39 @@ class EdifierWireCodecTest {
         )
         val actual = EdifierWireCodec.setAnc(EdifierWireCodec.ANC_VALUE_OFF)
         assertEquals(expected.toHex(), actual.toHex())
+    }
+
+    @Test
+    fun `game-mode query and writes match captured framing`() {
+        assertEquals(
+            hex("AA EC 08 00 00 9E").toHex(),
+            EdifierWireCodec.queryGameState.toHex(),
+        )
+        assertEquals(
+            hex("AA EC 09 00 01 A4 44").toHex(),
+            EdifierWireCodec.setGameMode(enabled = true).toHex(),
+        )
+        assertEquals(
+            hex("AA EC 09 00 01 A5 45").toHex(),
+            EdifierWireCodec.setGameMode(enabled = false).toHex(),
+        )
+    }
+
+    @Test
+    fun `game-mode query and set responses expose only valid boolean values`() {
+        val queryOn = EdifierWireCodec.Decoder().offer(
+            hex("BB EC 08 00 01 A4 54"),
+        ).single()
+        val queryOff = EdifierWireCodec.Decoder().offer(
+            hex("BB EC 08 00 01 A5 55"),
+        ).single()
+        val setOn = EdifierWireCodec.Decoder().offer(
+            hex("BB EC 09 00 01 A4 55"),
+        ).single()
+
+        assertEquals(true, EdifierWireCodec.parseGameModeState(queryOn))
+        assertEquals(false, EdifierWireCodec.parseGameModeState(queryOff))
+        assertEquals(true, EdifierWireCodec.parseGameModeState(setOn))
     }
 
     @Test

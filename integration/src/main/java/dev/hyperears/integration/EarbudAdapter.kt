@@ -45,7 +45,7 @@ abstract class EarbudAdapter(
     open val transports: List<EarbudTransportSpec> = emptyList()
 
     /** Evidence required before a transport candidate becomes the session's active channel. */
-    open val transportReadiness: TransportReadiness = TransportReadiness.CONNECTED
+    open val transportReadiness: TransportReadiness = TransportReadiness.PROTOCOL_HANDSHAKE
 
     /** Vendor applications that must own the private channel while their process is alive. */
     open val controlApps: List<ControlAppSpec> = emptyList()
@@ -73,6 +73,28 @@ abstract class EarbudAdapter(
         InitialProtocolFailureResolution.KeepDormant
 
     /**
+     * Applies the user policy to an Adapter-declared initial-protocol fallback.
+     *
+     * A disabled vendor fallback must never be activated indirectly. In that case the only
+     * permitted substitute is Android's standard-headset integration; if the user disabled that
+     * Adapter as well, the current Adapter remains dormant and no replacement is installed.
+     */
+    fun resolveInitialProtocolFailure(): InitialProtocolFailureResolution {
+        val declared = onInitialProtocolUnavailable()
+        if (declared !is InitialProtocolFailureResolution.FallbackTo) return declared
+
+        val fallback = when {
+            isAdapterEnabled(declared.adapter.id) -> declared.adapter
+            isAdapterEnabled(StandardEarbudAdapter.ID) -> StandardEarbudAdapter(
+                initialRuntimeState = runtimeState(),
+            )
+            else -> return InitialProtocolFailureResolution.KeepDormant
+        }
+        fallback.configureDisabledAdapterIds(disabledReplacementAdapterIds)
+        return InitialProtocolFailureResolution.FallbackTo(fallback)
+    }
+
+    /**
      * Mutable wire-conversation state owned by this adapter instance.
      *
      * Registry entries are factories; a runtime adapter is never shared by two physical devices.
@@ -85,6 +107,27 @@ abstract class EarbudAdapter(
     private var confirmedCapabilities: EarbudCapabilities? = null
     private var confirmedNoiseModes: Set<NoiseMode>? = null
     private var confirmedBatterySource: BatterySource? = null
+    @Volatile
+    private var disabledReplacementAdapterIds: Set<String> = emptySet()
+
+    /** Applies the user policy to any concrete Adapter selected during protocol negotiation. */
+    fun configureDisabledAdapterIds(adapterIds: Set<String>) {
+        disabledReplacementAdapterIds = adapterIds.toSet()
+    }
+
+    /** Allows a family Adapter to reject a disabled protocol-identified replacement. */
+    protected fun isAdapterEnabled(adapterId: String): Boolean =
+        adapterId !in disabledReplacementAdapterIds
+
+    /** Creates a protocol-driven replacement only when its stable Adapter ID is enabled. */
+    protected fun selectReplacement(
+        adapter: EarbudAdapter,
+        activation: AdapterActivation,
+    ): HandshakeResult? = if (isAdapterEnabled(adapter.id)) {
+        HandshakeResult.Replace(adapter, activation)
+    } else {
+        null
+    }
 
     protected open fun createProtocolSession(): ProtocolSession = StandardBluetoothProtocolSession()
 
@@ -111,6 +154,7 @@ abstract class EarbudAdapter(
         var changed = false
         var handshake: HandshakeResult? = null
         val unknown = mutableListOf<ProtocolEvent.UnknownFrame>()
+        val eventScope = RecordingAdapterEventScope()
 
         // Apply telemetry first so a replacement Adapter receives the complete runtime snapshot
         // decoded from this transport read, independent of event ordering inside a codec.
@@ -118,10 +162,21 @@ abstract class EarbudAdapter(
             when (event) {
                 is ProtocolEvent.FeatureStateChanged -> {
                     if (!featureStateContract.accepts(this, event.state)) return@forEach
-                    val nextFeatures = runtimeState.features.update(event.state)
-                    if (nextFeatures != runtimeState.features) {
-                        runtimeState = runtimeState.copy(features = nextFeatures)
-                        changed = true
+                    when (onFeatureReported(event.state, eventScope)) {
+                        FeatureReportDecision.ACCEPT -> {
+                            if (event.state is BatteryFeatureState) {
+                                batterySourceAfterProtocolEvidence()?.let {
+                                    confirmedBatterySource = it
+                                }
+                            }
+                            val nextFeatures = runtimeState.features.update(event.state)
+                            if (nextFeatures != runtimeState.features) {
+                                runtimeState = runtimeState.copy(features = nextFeatures)
+                                changed = true
+                            }
+                        }
+
+                        FeatureReportDecision.HOLD -> Unit
                     }
                 }
 
@@ -159,14 +214,32 @@ abstract class EarbudAdapter(
             addAll(protocolSession.drainImmediateCommands())
             events.forEach { event -> addAll(protocolSession.followUpCommands(event)) }
         }
+        (handshake as? HandshakeResult.Replace)
+            ?.adapter
+            ?.let { replacement ->
+                replacement.disabledReplacementAdapterIds = disabledReplacementAdapterIds
+                replacement.adoptProtocolState(this)
+            }
         changed = changed || snapshot() != previousSnapshot
         return AdapterIoResult(
             commands = commands,
             handshake = handshake,
             stateChanged = changed,
             unknownFrames = unknown,
+            effects = eventScope.effects(),
         )
     }
+
+    /**
+     * Handles one decoded report after structural validation but before public-state admission.
+     *
+     * A concrete model may hold a verified transient and record a one-shot state request through
+     * [scope]. The default preserves the direct report-to-state behavior of every existing Adapter.
+     */
+    protected open fun onFeatureReported(
+        state: DeviceFeatureState,
+        scope: AdapterEventScope,
+    ): FeatureReportDecision = FeatureReportDecision.ACCEPT
 
     /** Maps authoritative vendor identity evidence to a new concrete adapter when needed. */
     protected open fun onProductIdentified(productId: Int): HandshakeResult? = null
@@ -183,14 +256,14 @@ abstract class EarbudAdapter(
             noiseControl = nextModes.isNotEmpty(),
             windNoiseControl = NoiseMode.WIND in nextModes,
         )
-        if (battery) {
-            batterySourceAfterProtocolEvidence()?.let { confirmedBatterySource = it }
-        }
         return null
     }
 
-    /** Allows a family Adapter to promote system battery to private telemetry after valid evidence. */
-    protected open fun batterySourceAfterProtocolEvidence(): BatterySource? = null
+    /** Promotes the standard fallback only after this private session proves battery telemetry. */
+    protected open fun batterySourceAfterProtocolEvidence(): BatterySource? =
+        BatterySource.PRIVATE_PROTOCOL.takeIf {
+            privateProtocolRequired && batterySource == BatterySource.SYSTEM_AGGREGATE
+        }
 
     fun effectiveCapabilities(): EarbudCapabilities = confirmedCapabilities ?: capabilities
 
@@ -252,6 +325,27 @@ abstract class EarbudAdapter(
         )
     }
 
+    /**
+     * Records model-owned follow-up effects after the complete control write succeeds.
+     *
+     * The Android runtime invokes this exactly once after [executeControl] commands are written. A
+     * failed write never arms model confirmation state.
+     */
+    fun controlWritten(request: ControlRequest): List<AdapterEffect> {
+        val scope = RecordingAdapterEventScope()
+        onControlWritten(request, scope)
+        return scope.effects()
+    }
+
+    protected open fun onControlWritten(
+        request: ControlRequest,
+        scope: AdapterEventScope,
+    ) = Unit
+
+    /** Encodes one Adapter-requested state read on the current protocol session. */
+    fun queryState(featureId: String): List<ByteArray> =
+        protocolSession.query(TelemetryQuery.RefreshFeature(featureId))
+
     fun onSystemBatteryChanged(percent: Int?): Boolean {
         if (effectiveBatterySource() != BatterySource.SYSTEM_AGGREGATE) return false
         val battery = EarbudBattery.fromSystemAggregate(percent)
@@ -278,7 +372,29 @@ abstract class EarbudAdapter(
         return true
     }
 
+    /** Transfers protocol evidence during an in-place Adapter refinement. */
+    private fun adoptProtocolState(source: EarbudAdapter): Boolean {
+        var changed = adoptRuntimeState(source.runtimeState())
+        val promotedBatterySource = batterySourceAfterProtocolEvidence()
+        if (source.effectiveBatterySource() == BatterySource.PRIVATE_PROTOCOL &&
+            promotedBatterySource != null &&
+            effectiveBatterySource() != promotedBatterySource
+        ) {
+            confirmedBatterySource = promotedBatterySource
+            changed = true
+        }
+        return changed
+    }
+
     fun runtimeState(): AdapterRuntimeState = runtimeState
+
+    /** Removes one Adapter-owned transient feature when its protocol evidence is reset. */
+    protected fun removeFeatureState(featureId: String) {
+        val next = runtimeState.features.remove(featureId)
+        if (next != runtimeState.features) {
+            runtimeState = runtimeState.copy(features = next)
+        }
+    }
 
     fun snapshot(): AdapterSnapshot = AdapterSnapshot(
         id = id,
@@ -301,11 +417,47 @@ abstract class EarbudAdapter(
     )
 
     fun resetProtocolSession() {
+        val previousBatterySource = effectiveBatterySource()
         protocolSession.reset()
+        confirmedCapabilities = null
+        confirmedNoiseModes = null
+        confirmedBatterySource = null
+        runtimeState = runtimeState.copy(
+            features = runtimeState.features
+                .remove(NoiseModeFeatureState.FEATURE_ID)
+                .let { features ->
+                    if (
+                        previousBatterySource == BatterySource.SYSTEM_AGGREGATE &&
+                        batterySource == BatterySource.SYSTEM_AGGREGATE
+                    ) {
+                        features
+                    } else {
+                        features.remove(BatteryFeatureState.FEATURE_ID)
+                    }
+                },
+        )
+        onProtocolReset()
     }
+
+    /** Clears model-owned transient protocol state whenever the physical conversation is reset. */
+    protected open fun onProtocolReset() = Unit
 
     protected fun normalizeDeviceName(value: String): String =
         value.lowercase().filter(Char::isLetterOrDigit)
+}
+
+private class RecordingAdapterEventScope : AdapterEventScope {
+    private val recordedEffects = mutableListOf<AdapterEffect>()
+
+    override fun requestState(featureId: String, delayMs: Long) {
+        recordedEffects += AdapterEffect.RequestState(featureId, delayMs)
+    }
+
+    override fun cancelStateRequest(featureId: String) {
+        recordedEffects += AdapterEffect.CancelStateRequest(featureId)
+    }
+
+    fun effects(): List<AdapterEffect> = recordedEffects.toList()
 }
 
 private class StandardBluetoothProtocolSession : ProtocolSession {
@@ -363,60 +515,234 @@ open class StandardEarbudAdapter(
 /**
  * Resolves the most specific eligible adapter first.
  */
+enum class EarbudAdapterKind {
+    MODEL,
+    FAMILY,
+    STANDARD,
+}
+
+data class EarbudAdapterDescriptor(
+    val id: String,
+    val displayName: String,
+    val kind: EarbudAdapterKind,
+) {
+    init {
+        require(id.isNotBlank())
+        require(displayName.isNotBlank())
+    }
+}
+
+data class EarbudAdapterGroup(
+    val id: String,
+    val displayName: String,
+    val adapters: List<EarbudAdapterDescriptor>,
+) {
+    init {
+        require(id.isNotBlank())
+        require(displayName.isNotBlank())
+        require(adapters.isNotEmpty())
+    }
+}
+
 object EarbudAdapterRegistry {
-    private val factories: List<() -> EarbudAdapter> = buildList {
-        add(::VivoTwsAir3ProAdapter)
-        add(::VivoTws3eAdapter)
-        add(::VivoEarbudAdapter)
-        add(::StarRingUltraAdapter)
-        add(::StarRingEarbudAdapter)
-        add(::OppoEncoAir2ProAdapter)
-        add(::OppoEncoFree4Adapter)
-        add(::OppoEncoX3Adapter)
-        add(::OppoEncoAir5Adapter)
-        add(::OppoEarbudAdapter)
-        add(::BoseHeadphonesAdapter)
-        add(::BoseEarbudAdapter)
-        add(::EdifierW860NBProAdapter)
-        add(::EdifierEvoProAdapter)
-        add(::EdifierHeadphonesAdapter)
-        add(::EdifierEarbudAdapter)
-        add(::FurinaEndlessAdapter)
-        add(::RoseEarfreeI5Adapter)
-        add(::RoseEarfreeProtocolFamilyAdapter)
-        add(::RoseBudsFeelMk2Adapter)
-        add(::RoseBudsFeelProtocolFamilyAdapter)
-        add(::RoseEarbudAdapter)
-        add(::NiceHckYuanDaoOrigAdapter)
-        add(::NiceHckEarbudAdapter)
-        add(::HonorX5sProAdapter)
-        // Apple devices are handled by the platform; keep AAP code available for explicit use,
-        // but do not add Apple adapters to HyperEars' default matching chain.
-        addAll(SonyAdapterRegistry.factories)
-        add(::StandardEarbudAdapter)
+    private data class GroupMetadata(
+        val id: String,
+        val displayName: String,
+    )
+
+    private class Registration(
+        val group: GroupMetadata,
+        val factory: () -> EarbudAdapter,
+    ) {
+        val descriptor: EarbudAdapterDescriptor
+        val privateCapabilitiesInitiallyLocked: Boolean
+
+        init {
+            val adapter = factory()
+            descriptor = EarbudAdapterDescriptor(
+                id = adapter.id,
+                displayName = adapter.displayName,
+                kind = when (adapter.resolution) {
+                    AdapterResolution.EXACT_MATCH,
+                    AdapterResolution.PROTOCOL_CONFIRMED,
+                    -> EarbudAdapterKind.MODEL
+
+                    AdapterResolution.FAMILY_MATCH -> EarbudAdapterKind.FAMILY
+                    AdapterResolution.STANDARD -> EarbudAdapterKind.STANDARD
+                },
+            )
+            val snapshot = adapter.snapshot()
+            val capabilities = snapshot.capabilities
+            privateCapabilitiesInitiallyLocked = !adapter.privateProtocolRequired ||
+                (
+                    snapshot.batterySource == BatterySource.SYSTEM_AGGREGATE &&
+                        capabilities.battery &&
+                        capabilities.audioHandoff &&
+                        !capabilities.noiseControl &&
+                        !capabilities.windNoiseControl &&
+                        !capabilities.spatialAudio &&
+                        !capabilities.wearDetection &&
+                        !capabilities.findDevice &&
+                        snapshot.supportedNoiseModes.isEmpty() &&
+                        snapshot.presentationId == null &&
+                        adapter.transportReadiness == TransportReadiness.PROTOCOL_HANDSHAKE
+                )
+        }
     }
 
-    val adapters: List<EarbudAdapter> get() = factories.map { it() }
+    private val vivoGroup = GroupMetadata("vivo", "vivo / iQOO")
+    private val oppoGroup = GroupMetadata("oppo", "OPPO Enco")
+    private val starRingGroup =
+        GroupMetadata("starring", "StarRing / 籁特易耳")
+    private val boseGroup = GroupMetadata("bose", "Bose")
+    private val edifierGroup =
+        GroupMetadata("edifier", "Edifier / 漫步者")
+    private val roseGroup =
+        GroupMetadata("rose", "ROSESELSA / 弱水时砂")
+    private val niceHckGroup =
+        GroupMetadata("nicehck", "NiceHCK / 原道")
+    private val moondropGroup =
+        GroupMetadata("moondrop", "MOONDROP / 水月雨")
+    private val honorGroup = GroupMetadata("honor", "荣耀")
+    private val huaweiGroup = GroupMetadata("huawei", "华为")
+    private val sonyGroup = GroupMetadata("sony", "Sony")
+    private val qcyGroup = GroupMetadata("qcy", "QCY")
+    private val technicsGroup = GroupMetadata("technics", "Technics")
+    private val standardGroup = GroupMetadata("standard", "标准蓝牙耳机")
 
-    private val adapterIds = factories.map { it().id }
+    private val initialRegistrations: List<Registration> = buildList {
+        add(Registration(vivoGroup, ::VivoTwsAir3ProAdapter))
+        add(Registration(vivoGroup, ::VivoTws3eAdapter))
+        add(Registration(vivoGroup, ::VivoEarbudAdapter))
+        add(Registration(starRingGroup, ::StarRingUltraAdapter))
+        add(Registration(starRingGroup, ::StarRingEarbudAdapter))
+        add(Registration(oppoGroup, ::OppoEncoAir2ProAdapter))
+        add(Registration(oppoGroup, ::OppoEncoFree4Adapter))
+        add(Registration(oppoGroup, ::OppoEncoX3Adapter))
+        add(Registration(oppoGroup, ::OppoEncoAir5Adapter))
+        add(Registration(oppoGroup, ::OppoEarbudAdapter))
+        add(Registration(boseGroup, ::BoseHeadphonesAdapter))
+        add(Registration(boseGroup, ::BoseEarbudAdapter))
+        add(Registration(edifierGroup, ::EdifierW860NBProAdapter))
+        add(Registration(edifierGroup, ::EdifierEvoProAdapter))
+        add(Registration(edifierGroup, ::EdifierFitClipUltraAdapter))
+        add(Registration(edifierGroup, ::EdifierFitBudsTurboAdapter))
+        add(Registration(edifierGroup, ::EdifierHeadphonesAdapter))
+        add(Registration(edifierGroup, ::EdifierEarbudAdapter))
+        add(Registration(roseGroup, ::FurinaEndlessAdapter))
+        add(Registration(roseGroup, ::RoseLuliXAdapter))
+        add(Registration(roseGroup, ::RoseLuliUltraAdapter))
+        add(Registration(roseGroup, ::RoseEarfreeI5Adapter))
+        add(Registration(roseGroup, ::RoseEarfreeProtocolFamilyAdapter))
+        add(Registration(roseGroup, ::RoseBudsFeelMk2Adapter))
+        add(Registration(roseGroup, ::RoseBudsFeelProtocolFamilyAdapter))
+        add(Registration(roseGroup, ::RoseEarbudAdapter))
+        add(Registration(niceHckGroup, ::NiceHckYuanDaoOrigAdapter))
+        add(Registration(niceHckGroup, ::NiceHckEarbudAdapter))
+        add(Registration(moondropGroup, ::MoondropPuddingAdapter))
+        add(Registration(moondropGroup, ::MoondropRobinAdapter))
+        add(Registration(moondropGroup, ::MoondropEarbudAdapter))
+        add(Registration(honorGroup, ::HonorX5sProAdapter))
+        add(Registration(huaweiGroup, ::HuaweiFreebuds5iAdapter))
+        add(Registration(huaweiGroup, ::HuaweiFreebudsPro3Adapter))
+        add(Registration(huaweiGroup, ::HuaweiFreeBuds4Adapter))
+        add(Registration(huaweiGroup, ::HuaweiFreeClip2Adapter))
+        add(Registration(huaweiGroup, ::HuaweiFreebudsFamilyAdapter))
+        add(Registration(qcyGroup, ::QcyCrosskyC50sAdapter))
+        add(Registration(qcyGroup, ::QcyStandardGattAdapter))
+        add(Registration(technicsGroup, ::TechnicsEarbudAdapter))
+        // Apple devices are handled by the platform; keep AAP code available for explicit use,
+        // but do not add Apple adapters to HyperEars' default matching chain.
+        addAll(SonyAdapterRegistry.factories.map { Registration(sonyGroup, it) })
+        add(Registration(standardGroup, ::StandardEarbudAdapter))
+    }
+
+    /** Protocol-identified models are catalogued lazily and never enter initial name matching. */
+    private val catalogOnlyRegistrations: List<Registration> by lazy {
+        BoseBmapModelRegistry.factories.map { factory ->
+            Registration(
+                group = boseGroup,
+                factory = factory,
+            )
+        }
+    }
+
+    private val catalogRegistrations: List<Registration> by lazy {
+        (initialRegistrations + catalogOnlyRegistrations).also(::requireUniqueIds)
+    }
+
+    val groups: List<EarbudAdapterGroup> by lazy {
+        catalogRegistrations
+            .groupBy(Registration::group)
+            .map { (group, members) ->
+                EarbudAdapterGroup(
+                    id = group.id,
+                    displayName = group.displayName,
+                    adapters = members.map(Registration::descriptor),
+                )
+            }
+    }
+
+    /** Builds the settings-only catalog without touching the connection matching hot path. */
+    fun preloadCatalog() {
+        groups.size
+    }
+
+    val adapters: List<EarbudAdapter> get() = catalogRegistrations.map { it.factory() }
+
+    val adapterIds: Set<String> by lazy {
+        catalogRegistrations.mapTo(linkedSetOf()) { it.descriptor.id }
+    }
 
     init {
-        require(adapterIds.distinct().size == adapterIds.size) {
-            val duplicates = adapterIds
-                .groupingBy { it }
-                .eachCount()
-                .filterValues { it > 1 }
-                .keys
+        requireUniqueIds(initialRegistrations)
+        requireInitialPrivateCapabilitiesLocked(initialRegistrations)
+    }
+
+    fun resolve(
+        identity: EarbudIdentity,
+        disabledAdapterIds: Set<String> = emptySet(),
+    ): EarbudAdapter? {
+        if (PlatformReservedHeadsetPolicy.reserves(identity)) return null
+        return initialRegistrations.asSequence()
+            .filterNot { it.descriptor.id in disabledAdapterIds }
+            .map { it.factory() }
+            .firstOrNull { it.matches(identity) }
+    }
+
+    fun forIntegration(
+        identity: EarbudIdentity,
+        disabledAdapterIds: Set<String> = emptySet(),
+    ): EarbudAdapter? = resolve(identity, disabledAdapterIds)
+        ?.takeIf(EarbudAdapter::integrationEnabled)
+
+    private fun requireUniqueIds(registrations: List<Registration>) {
+        val duplicates = registrations
+            .map { it.descriptor.id }
+            .groupingBy { it }
+            .eachCount()
+            .filterValues { it > 1 }
+            .keys
+        require(duplicates.isEmpty()) {
             "Earbud adapter IDs must be unique: $duplicates"
         }
     }
 
-    fun resolve(identity: EarbudIdentity): EarbudAdapter? {
-        if (PlatformReservedHeadsetPolicy.reserves(identity)) return null
-        return factories.asSequence().map { it() }.firstOrNull { it.matches(identity) }
+    /**
+     * Identity matching may select a protocol candidate, but it must never authorize a private
+     * feature. Every directly registered private Adapter starts from Android's standard headset
+     * projection and unlocks telemetry, controls, and custom cards only from protocol evidence.
+     * Protocol-confirmed replacement Adapters (for example Bose product-ID models) are catalogued
+     * separately and therefore are intentionally outside this invariant.
+     */
+    private fun requireInitialPrivateCapabilitiesLocked(registrations: List<Registration>) {
+        val violations = registrations
+            .filterNot(Registration::privateCapabilitiesInitiallyLocked)
+            .map { it.descriptor.id }
+        require(violations.isEmpty()) {
+            "Initial private adapters must keep vendor capabilities locked until protocol evidence: " +
+                violations.joinToString()
+        }
     }
-
-    fun forIntegration(identity: EarbudIdentity): EarbudAdapter? =
-        resolve(identity)?.takeIf(EarbudAdapter::integrationEnabled)
 
 }

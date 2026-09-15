@@ -13,6 +13,8 @@ object RoseBudsFeelMk2WireCodec {
         OFF(2),
         TRANSPARENCY(3),
         WIND(4),
+        ADAPTIVE_ANC(5),
+        EXTREME_ANC(6),
     }
 
     sealed interface State {
@@ -72,24 +74,60 @@ object RoseBudsFeelMk2WireCodec {
     }
 
     private fun ByteArray.validFrameEnd(): Int {
-        if (size < FRAME_HEADER_SIZE) return INCOMPLETE_FRAME
-        val payloadLength = this[PAYLOAD_LENGTH_INDEX].unsigned()
+        validatedFrameEndAt(0)?.let { return it }
 
-        val checksumIndex = FRAME_HEADER_SIZE + payloadLength
-        val terminatorIndex = checksumIndex + 1
-        if (size <= terminatorIndex) return INCOMPLETE_FRAME
-        if (this[terminatorIndex] != TERMINATOR) return INVALID_FRAME
+        // A terminator or response marker can legally occur inside extension data. Therefore a
+        // partial frame is never discarded from either byte alone. Resynchronize only when a
+        // complete, checksum-valid frame is already available at a later response marker.
+        for (candidateStart in 1 until size) {
+            if (this[candidateStart] != RESPONSE_MARKER) continue
+            if (validatedFrameEndAt(candidateStart) != null) return INVALID_FRAME
+        }
 
-        val expected = copyOfRange(0, checksumIndex).checksum()
-        return if (this[checksumIndex] == expected) terminatorIndex else INVALID_FRAME
+        // A permanently corrupt frame cannot retain the stream indefinitely.
+        if (size > MAX_FRAME_SIZE) return INVALID_FRAME
+        return INCOMPLETE_FRAME
+    }
+
+    /** Returns the first checksum-valid frame end at [start], or `null` while none is complete. */
+    private fun ByteArray.validatedFrameEndAt(start: Int): Int? {
+        if (size - start < FRAME_HEADER_SIZE) return null
+        if (this[start] != RESPONSE_MARKER) return null
+
+        val payloadLength = this[start + PAYLOAD_LENGTH_INDEX].unsigned()
+        val firstChecksumIndex = start + FRAME_HEADER_SIZE + payloadLength
+        if (firstChecksumIndex + 1 >= size) return null
+
+        // The checksum excludes the candidate checksum byte itself. Carry the sum forward while
+        // scanning so each possible compact/extended boundary is tested without copying arrays.
+        var expectedChecksum = 0
+        for (index in start until firstChecksumIndex) {
+            expectedChecksum = (expectedChecksum + this[index].unsigned()) and 0xFF
+        }
+        for (checksumIndex in firstChecksumIndex until size - 1) {
+            if (this[checksumIndex + 1] == TERMINATOR &&
+                this[checksumIndex].unsigned() == expectedChecksum
+            ) {
+                return checksumIndex + 1
+            }
+            expectedChecksum = (expectedChecksum + this[checksumIndex].unsigned()) and 0xFF
+        }
+        return null
     }
 
     private fun parseFrame(frame: ByteArray): List<State> {
         if (frame.size < MIN_FRAME_SIZE) return emptyList()
         val payloadLength = frame[PAYLOAD_LENGTH_INDEX].unsigned()
         val payloadEnd = FRAME_HEADER_SIZE + payloadLength
-        if (payloadEnd + FRAME_TRAILER_SIZE != frame.size) return emptyList()
-        return parsePayload(frame.copyOfRange(FRAME_HEADER_SIZE, payloadEnd))
+        if (payloadEnd + FRAME_TRAILER_SIZE > frame.size) return emptyList()
+        val states = parsePayload(
+            frame.copyOfRange(FRAME_HEADER_SIZE, payloadEnd),
+        ).toMutableList()
+        val extensionEnd = frame.size - FRAME_TRAILER_SIZE
+        if (payloadEnd < extensionEnd) {
+            states += parseTlvBlock(frame, payloadEnd, extensionEnd)
+        }
+        return states
     }
 
     private fun parsePayload(payload: ByteArray): List<State> {
@@ -101,13 +139,7 @@ object RoseBudsFeelMk2WireCodec {
         if (payload.size == DIRECT_BATTERY_PAYLOAD_LENGTH &&
             payload[0].unsigned() == BATTERY_TYPE
         ) {
-            return listOf(
-                State.Battery(
-                    leftPercent = payload[1].batteryPercent(),
-                    rightPercent = payload[2].batteryPercent(),
-                    casePercent = payload[3].batteryPercent(),
-                ),
-            )
+            return listOf(decodeBattery(payload, 1))
         }
         return parseTlvBlock(payload, 0, payload.size)
     }
@@ -129,11 +161,7 @@ object RoseBudsFeelMk2WireCodec {
                 }
 
                 BATTERY_TYPE -> if (length >= 4) {
-                    result += State.Battery(
-                        leftPercent = data[index + 2].batteryPercent(),
-                        rightPercent = data[index + 3].batteryPercent(),
-                        casePercent = data[index + 4].batteryPercent(),
-                    )
+                    result += decodeBattery(data, index + 2)
                 }
             }
 
@@ -149,7 +177,18 @@ object RoseBudsFeelMk2WireCodec {
     private fun Byte.toNoiseMode(): NoiseMode? =
         NoiseMode.entries.firstOrNull { it.value == unsigned() }
 
-    private fun Byte.batteryPercent(): Int? = unsigned().takeIf { it in 0..100 }
+    private fun decodeBattery(data: ByteArray, valueStart: Int): State.Battery {
+        return State.Battery(
+            leftPercent = data[valueStart].batteryPercent(),
+            rightPercent = data[valueStart + 1].batteryPercent(),
+            casePercent = data[valueStart + 2].batteryPercent(),
+        )
+    }
+
+    /** BudsFeel carries the percentage in the lower seven bits. Bit 7 remains reserved. */
+    private fun Byte.batteryPercent(): Int? =
+        (unsigned() and BATTERY_PERCENT_MASK).takeIf { it in 0..100 }
+
     private fun ByteArray.checksum(): Byte = sumOf { it.unsigned() }.and(0xFF).toByte()
     private fun Byte.unsigned(): Int = toInt() and 0xFF
 
@@ -161,8 +200,10 @@ object RoseBudsFeelMk2WireCodec {
     private const val FRAME_HEADER_SIZE = 3
     private const val FRAME_TRAILER_SIZE = 2
     private const val PAYLOAD_LENGTH_INDEX = 2
+    private const val MAX_FRAME_SIZE = 1024
     private const val DIRECT_NOISE_PAYLOAD_LENGTH = 2
     private const val DIRECT_BATTERY_PAYLOAD_LENGTH = 4
+    private const val BATTERY_PERCENT_MASK = 0x7F
     private const val INCOMPLETE_FRAME = -1
     private const val INVALID_FRAME = -2
     private const val REQUEST_MARKER: Byte = 0xFF.toByte()

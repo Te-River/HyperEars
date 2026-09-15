@@ -25,6 +25,15 @@ data class DeviceSessionUiModel(
     val headsetLifecycle: List<DeviceLinkStage>,
     val miLinkLifecycle: List<DeviceLifecycleStage>,
     val metrics: List<DeviceMetric>,
+    val noiseControl: NoiseControlUiModel?,
+    val sessionToken: String,
+)
+
+/** Generic control projection; concrete Adapter and protocol types never reach Compose. */
+data class NoiseControlUiModel(
+    val supportedModes: List<NoiseMode>,
+    val selectedMode: NoiseMode?,
+    val enabled: Boolean,
 )
 
 data class DeviceLinkStage(
@@ -43,7 +52,13 @@ enum class DeviceLinkStatus {
 data class DeviceMetric(
     val label: String,
     val value: String,
+    val kind: DeviceMetricKind = DeviceMetricKind.READ_ONLY,
 )
+
+enum class DeviceMetricKind {
+    READ_ONLY,
+    NOISE_MODE,
+}
 
 /**
  * The UI consumes only the immutable runtime adapter snapshot.
@@ -67,6 +82,27 @@ object DeviceSessionUiProjector {
             headsetLifecycle = headsetLifecycle(session),
             miLinkLifecycle = session.miLinkLifecycle,
             metrics = metrics(session, adapter),
+            noiseControl = noiseControl(session, adapter),
+            sessionToken = session.sessionToken,
+        )
+    }
+
+    private fun noiseControl(
+        session: DeviceSessionSnapshot,
+        adapter: AdapterSnapshot?,
+    ): NoiseControlUiModel? {
+        adapter ?: return null
+        if (!adapter.capabilities.noiseControl || adapter.supportedNoiseModes.isEmpty()) return null
+        val state = session.state
+        return NoiseControlUiModel(
+            supportedModes = adapter.supportedNoiseModes.sortedBy(NoiseMode::controlOrder),
+            selectedMode = state.noiseMode,
+            enabled = state.connected &&
+                state.lifecycle.controlOwnership == ControlOwnership.MODULE &&
+                (
+                    !adapter.privateProtocolRequired ||
+                        state.lifecycle.privateTransport == PrivateTransportState.CONNECTED
+                ),
         )
     }
 
@@ -150,8 +186,9 @@ object DeviceSessionUiProjector {
                 value = if (adapter?.capabilities?.noiseControl == false) {
                     "不支持"
                 } else {
-                    session.state.noiseMode.displayName()
+                    session.state.noiseMode.displayNameOrUnknown()
                 },
+                kind = DeviceMetricKind.NOISE_MODE,
             ),
         )
     }
@@ -217,12 +254,20 @@ private fun ProtocolHandshakeState.displayName(): String = when (this) {
 private fun BatteryReading.displayValue(): String =
     percent?.let { value -> if (charging) "$value%+" else "$value%" } ?: "—"
 
-private fun NoiseMode?.displayName(): String = when (this) {
+internal fun NoiseMode.displayName(): String = when (this) {
     NoiseMode.ANC -> "降噪"
     NoiseMode.OFF -> "关闭"
     NoiseMode.TRANSPARENCY -> "通透"
     NoiseMode.WIND -> "抗风噪"
-    null -> "—"
+}
+
+private fun NoiseMode?.displayNameOrUnknown(): String = this?.displayName() ?: "—"
+
+private fun NoiseMode.controlOrder(): Int = when (this) {
+    NoiseMode.ANC -> 0
+    NoiseMode.OFF -> 1
+    NoiseMode.TRANSPARENCY -> 2
+    NoiseMode.WIND -> 3
 }
 
 private fun HeadsetFormFactor.displayName(): String = when (this) {

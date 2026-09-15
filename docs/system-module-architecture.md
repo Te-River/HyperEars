@@ -52,6 +52,14 @@ system-module -> integration -> protocol
 
 Registry 存放工厂而不是 Adapter 单例。同一地址的新会话、不同地址的并行会话都会获得
 独立 Adapter 和独立 ProtocolSession，不共享解码缓冲、序列号、ACK 队列或运行状态。
+Registry 同时提供按品牌组织的只读 Adapter 目录。目录由同一组注册工厂生成，包含参与首次
+匹配的型号/家族 Adapter，以及只能由协议身份升级得到的具体型号 Adapter；设置 UI 不读取
+型号类或匹配条件。Bluetooth 进程解析设备时按稳定 Adapter ID 跳过已禁用项，并继续按原有
+顺序寻找后续 Adapter，因此关闭具体型号后可以落到家族，关闭家族后可以落到标准 Adapter。
+设置目录同时提供品牌总开关；它只批量更新该品牌下的稳定 Adapter ID，不引入第二套品牌判型。
+会话管理器保留当前物理连接的原始 `EarbudIdentity`，设置变化时使用同一 Registry 重新解析；
+只有 Adapter 结果发生变化才关闭旧会话并建立替代会话。家族握手阶段产生的协议确认替换也
+继承同一禁用集合，不能重新启用已被用户关闭的具体型号。
 
 Adapter 继承链只表达可复用行为：
 
@@ -65,6 +73,7 @@ EarbudAdapter
        ├─ Edifier
        ├─ ROSESELSA
        ├─ NiceHCK
+       ├─ MOONDROP
        └─ Sony
 ```
 
@@ -109,6 +118,8 @@ EarbudAdapter
 ```text
 ProtocolSession
   -> ProtocolEvent.FeatureStateChanged
+  -> EarbudAdapter.onFeatureReported
+  -> FeatureReportDecision
   -> EarbudAdapter.runtimeState.features
   -> EarbudState.features
   -> FeatureStateTransport
@@ -118,6 +129,19 @@ ProtocolSession
 `DeviceFeatureSnapshot` 按稳定 `featureId` 替换同类值，保证同一状态只保留最新值。
 Adapter 通过 `featureStateContract` 声明可保留的状态类型；在家族探测细化、具体型号升级或
 保守回退时，会话把旧快照转移给新 Adapter，并过滤新 Adapter 不理解的特性状态。
+
+`FeatureStateChanged` 表示结构合法的设备观测，并不绕过 Adapter 聚合边界。默认 Adapter 返回
+`FeatureReportDecision.ACCEPT`，观测立即进入统一状态；已验证存在连接初期暂态报告或控制写入后
+延迟生效的具体型号，可以返回 `HOLD`，并通过事件局部的 `AdapterEventScope` 记录一次
+`requestState(featureId, delayMs)`。获得可接受状态或达到型号自己的次数边界时，Adapter 返回
+`ACCEPT`，并记录 `cancelStateRequest(featureId)`。
+
+事件作用域只收集有序 `AdapterEffect`，不会在 Adapter 回调期间启动计时器、访问 Android 或
+反向调用会话。Android 侧的 `StateRequestDispatcher` 仅保证同一设备、同一 `featureId` 最多
+存在一个待执行请求，按声明时间串行调用 `ProtocolSession.query()` 生成查询字节；它不保存目标
+状态、尝试次数和型号判断。通道断开、Adapter 替换、厂商 App 接管或设备会话结束时统一取消
+所有请求。这样，Adapter 独立管理型号状态机，ProtocolSession 不持有协程、Socket 或 UI，运行时
+也不会随着更多型号适配而堆积策略字段。
 
 `CapabilitiesIdentified`、`ProductIdentified`、握手结果和 `DeviceLifecycle` 不属于动态特性
 状态：前两者是协议证据，决定能否向用户开放能力；后两者描述会话生命周期。有效能力和状态
@@ -152,6 +176,13 @@ MiLink/CardAdapter
     -> vendor bytes
 ```
 
+`Refresh` 是公共的一次性状态同步请求。MiLink 耳机详情卡片进入可见状态，以及 HyperEars 主页
+成为当前页面时，由各自的公共生命周期协调器发送一次 `StandardControlRequest.Refresh`；具体
+CardAdapter 不负责刷新，也不会建立轮询。Bluetooth 设备会话将 1.5 秒内来自多个界面或 MiLink
+进程的重复刷新合并为一次，并使用独立门禁，避免影响紧随其后的用户控制。具体
+ProtocolSession 只查询已经验证、可读取的状态；标准蓝牙 Adapter 将其处理为安全空操作，继续
+使用 Android 系统电量。
+
 `ControlRequestTransport` 使用 Kotlin Serialization 自动生成请求层级的序列化代码，采用
 稳定的 `@SerialName`、严格 schema 和 4 KiB 载荷上限。CardAdapter、Adapter 和
 ProtocolSession 不手写 Intent extra、JSON、Bundle 或信封字段。未知版本、未知请求、未知
@@ -161,6 +192,13 @@ Adapter 可为一个请求返回 `ControlExecutionPolicy`：`DEVICE_REPORT` 仅�
 权威回读，`PUBLISH_AFTER_WRITE` 在完整写事务成功后发布声明的特性状态且不增加回读，
 `PUBLISH_AFTER_WRITE_THEN_REFRESH` 则先发布再执行回读。命令冷却同样属于该策略，且只在
 Bluetooth 会话已持有活动通道时计入；MiLink UI 不维护型号专属的节流状态。
+
+若具体型号已验证写入后的早期回读仍可能是旧状态，它可以在 `onControlWritten()` 中记录本次
+控制目标，并通过 `AdapterEventScope` 声明第一次延迟查询。后续回报仍进入统一的
+`onFeatureReported()`：达到目标时接受并取消待执行请求；尚未达到时暂缓并声明下一次只读查询；
+达到有界次数仍不一致时接受最后真实回报，由统一快照矫正平台状态。该过程保持唯一
+`executeControl()`，不会重复执行用户控制，也不会把型号重试逻辑放入 Android 会话和
+ProtocolSession。
 
 新增厂商或型号专属控制时，在 `integration` 中声明带厂商命名空间 `@SerialName` 的
 `@Serializable` 请求子类型，家族 Adapter 通过 `controlRequestContract.extending { ... }`
@@ -220,13 +258,15 @@ MiLink 子进程在收到系统认领前可以消费相同的活动候选快照�
 - `RESTART_ON_CURRENT_CHANNEL`：保留通道，以新 Adapter 重新执行初始化；
 - `RECONNECT`：按新 Adapter 的传输声明重新连接。
 
-替换由 `EarbudDeviceSession` 在同一设备会话内原子完成。系统只保存一个 `adapter` 成员，
+当前 Adapter 在返回 `Replace` 前完成 ProtocolSession、运行状态和已确认协议事实的转移；
+`EarbudDeviceSession` 只在同一设备会话内原子安装结果。系统只保存一个 `adapter` 成员，
 不存在初始 Adapter、effectiveAdapter 或 Adapter/Profile 双状态。
 
 ## 5. 能力真实性
 
-具体型号可直接声明已有实机或公开资料确认的能力。仅靠家族名称匹配的 Adapter 默认不
-开放未经确认的私有写能力：
+初始匹配链中的家族与具体型号 Adapter 都只从标准流转、系统音量和 Android 整机电量
+起步。名称、服务 UUID、设备形态和已知型号配置只授权选择候选协议，不直接授权私有
+遥测、写能力或专用卡片：
 
 1. 建立候选传输；
 2. 发送只读握手/状态查询；
@@ -235,10 +275,16 @@ MiLink 子进程在收到系统认领前可以消费相同的活动候选快照�
 5. 发布新的完整 AdapterSnapshot；
 6. MiLink 才看到对应控制项。
 
-有效电量响应只确认电量；有效噪声状态/协议能力响应才确认噪声控制。失败或超时不会把
+所有标准耳机从 Android 系统整机电量开始。`CapabilitiesIdentified(battery=true)` 只确认协议
+具备电量遥测能力；只有经当前 Adapter 接受的私有电量状态才把来源晋升为私有协议。握手、
+噪声能力响应或仍在型号初始化确认中的电量观测都不会提前停止系统电量更新。有效噪声状态/
+协议能力响应才确认噪声控制。
+失败或超时不会把
 静态猜测能力留在卡片上。家族 Adapter 还可通过 `onInitialProtocolUnavailable()` 返回保守
-替代 Adapter；会话层只执行统一决策，不包含厂商品牌判断。ROSESELSA 产品线候选使用该
-机制在首次私有协议始终未确认时退回品牌标准能力。
+替代 Adapter；声明的目标已被用户关闭时，统一门禁只允许直接回退到启用中的
+`StandardEarbudAdapter`，标准回退也关闭时则保持休眠，不激活其他替代项。会话层只执行统一
+决策，不包含厂商品牌判断。ROSESELSA 产品线候选使用该机制在首次私有协议始终未确认时退回
+品牌标准能力。
 
 Bose 是型号细化示例：BMAP 产品 ID 产生 `ProductIdentified(productId)`，Bose Adapter
 把产品 ID 映射为具体 Adapter，并将已有 ProtocolSession 和运行状态转移过去。未知产品
@@ -260,9 +306,9 @@ ProtocolHandshakeState
 ```
 
 `sessionActive`、`connected`、`privateChannelConnected` 和 `handshakeAccepted` 仅是从该对象
-计算出的兼容视图。声明 `PROTOCOL_HANDSHAKE` 的设备需要系统音频、私有传输和协议确认
-同时就绪；声明“传输连接即就绪”的已验证设备将协议状态保持为 `NOT_REQUIRED`，不会
-伪造一次确认事件。
+计算出的兼容视图。所有需要私有协议的初始 Adapter 都声明 `PROTOCOL_HANDSHAKE`，必须在
+系统音频、私有传输和协议确认同时就绪后进入可操作状态。无需私有协议的标准回退保持
+`NOT_REQUIRED`，不会建立厂商控制通道。
 
 典型流程：
 
@@ -290,9 +336,18 @@ A2DP/HFP connected
 - `GattTransportSpec`；
 - `L2capEndpointSpec`。
 
+`GattTransportSpec` 默认直接连接当前 A2DP/HFP 会话设备。对于音频端点与控制端点分离的
+设备，Adapter 可以声明 `CompanionDevice`：运行层先检查已配对设备，必要时按指定的服务
+UUID 或厂商数据执行一次有时限的 BLE 扫描；Adapter 提供只依赖平台无关观测值的关联规则。
+厂商地址布局、名称规则和广播字段不会进入通用传输层，扫描结束、超时、会话取消或通道关闭
+都会停止扫描并释放等待任务。
+
 每台设备最多一个活动通道、一个 Reader、一个连接任务和一个串行写事务。控制写、协议
 即时响应和回读都经过同一互斥写入路径，防止重复帧和交叉事务。全局协调器只串行化昂贵
 的连接尝试，不限制多个已连接设备会话。
+
+协议握手截止由传输层执行；计时器到期时关闭当前候选通道，使阻塞的 RFCOMM、L2CAP 或
+GATT 读取退出，再进入既有的有限端点回退。成功握手会先取消截止任务，不会关闭活动通道。
 
 ### 7.1 厂商控制 App 退避
 
@@ -313,8 +368,12 @@ MiLink 流转、系统音量、标准蓝牙电量和设备形态，移除私有�
 能力，避免卡片显示“可点击但实际无效”的控制项。控制 App 退出后，会话在仍连接的前提下
 按同一有界重连策略恢复私有通道和协议确认；耳机已断开时不创建新的连接任务。
 
-MiLink 的“更多设置”按 Adapter 声明的优先级选择已安装且有 Launcher Activity 的控制 App，
-没有可启动的控制 App 时回退到真实蓝牙设备详情。LSPosed 没有公开的运行时作用域查询接口，
+MiLink 的“更多设置”按用户策略打开真实蓝牙设备详情、HyperEars，或按 Adapter 声明的优先级
+选择已安装且有 Launcher Activity 的控制 App。后两种目标启动失败时回退到真实蓝牙设备详情。
+入口解析优先使用稳定语义类和严格版本表；未知 MiLink 版本只有在两者均不可用时才执行一次
+唯一结果的 DEX 语义指纹查询。查询结果按 APK 路径缓存，且不进入卡片绑定、点击或蓝牙会话
+热路径；无法唯一确认时不安装入口 Hook。
+LSPosed 没有公开的运行时作用域查询接口，
 因此“已 Hook”以控制 App 实际发出的 Binder 登记为准；静态作用域只决定该登记 Hook 是否会
 被安装。页面跳转本身不依赖该登记，运行时退避则必须依赖登记。
 
@@ -353,12 +412,23 @@ MiLink 设备 ID 只由 `AdapterSnapshot.formFactor` 映射：TWS 使用一个�
 处理；该层只读取不可变状态快照，不连接蓝牙、不持有 Adapter 或 ProtocolSession、也不轮询。
 卡片扩展只依赖稳定的原生 View ID，不 Hook 混淆回调：例如 Bose
 AudioModes 两态设备保留系统三项布局，但把协议不支持的“关闭”项设为不可点击；支持
-抗风噪的具体型号则由对应 Adapter 选择明确的卡片呈现 ID。
+抗风噪的具体型号则由对应 Adapter 选择明确的卡片呈现 ID。共享的抗风噪 CardAdapter 同时
+识别旧版 HyperOS 的原生 ANC 行和 HyperOS 4 的原生三态选择行，保留三个系统模式项，仅在
+标题区增加降噪分支开关。
 
 ## 9. UI 投影
 
 `DeviceSessionUiProjector` 只读取不可变状态快照，输出通用 `DeviceSessionUiModel`。
 Compose 不导入具体 Adapter、ProtocolSession、WireCodec 或厂商类型。
+
+已确认噪声能力同样在该投影边界转换为通用模式控件描述。主页点击只携带地址、会话令牌和
+`StandardControlRequest.SetNoiseMode`；Bluetooth 进程仍由当前 Adapter 校验能力与模式集合，
+所以 Compose 不会绕过协议门禁，也不需要知道具体型号。
+
+应用内更新检查是与注入层隔离的 app-process 服务：自动检查只在 HyperEars 打开时触发并按
+24 小时间隔限流，手动检查只由“关于”页触发。Bluetooth、MiLink 和厂商控制 App 进程不创建
+更新检查器，也不执行网络请求。自动检查开关和上次检查时间保存在应用本地偏好中，不进入
+libxposed `RemotePreferences`，因此修改该开关不会唤醒或重配任何注入会话。
 
 每个会话展示三类真实状态：
 
@@ -380,6 +450,10 @@ Compose 不导入具体 Adapter、ProtocolSession、WireCodec 或厂商类型。
 6. 新动态状态：增加 `DeviceFeatureState` 子类型与 Adapter 状态契约；
 7. 原生卡片无法表达的呈现：增加独立 MiLinkCardAdapter。
 
+初始 Registry 在进程加载时验证统一门禁：任何直接注册且需要私有协议的 Adapter，都必须
+以系统整机电量、流转能力、空噪声模式和空专用卡片开始，并使用 `PROTOCOL_HANDSHAKE`。
+协议产品身份确认后创建的替换 Adapter 不属于初始匹配链，可按已确认产品配置原子发布能力。
+
 不得让 Registry、UI 或 MiLink Hook 解析厂商帧；不得让 ProtocolSession 按零售名称选择
 设备；不得通过共享 Adapter/ProtocolSession 单例复用会话状态；不得为型号专属状态向
 `EarbudState`、`AdapterRuntimeState` 或 IPC 新增固定字段。
@@ -387,7 +461,8 @@ Compose 不导入具体 Adapter、ProtocolSession、WireCodec 或厂商类型。
 ## 11. 性能约束
 
 - 初始匹配只在系统连接事件发生时执行；
-- 不主动扫描，不周期轮询设备；
+- 不做全局或周期扫描；只有声明独立控制端点的已连接会话可以执行一次带稳定过滤条件和
+  超时上限的定向扫描；
 - 每台活动私有协议设备一个阻塞 Reader；
 - 状态仅在 Adapter 快照、运行态或生命周期变化时发布；
 - 未确认或不需要私有协议的设备不建立额外通道；

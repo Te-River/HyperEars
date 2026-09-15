@@ -8,8 +8,11 @@
 > **Evidence levels:**
 >
 > - **W860NB PRO** — Full real-device verification (ANC, battery, capabilities, SPP framing)
-> - **花再 Evo Pro** — Real-device verification (BES framing, `ancIndex=0x1B`, aggregate battery
+> - **花再 Evo Pro** — Real-device verification (BES framing, `ancIndex=0x1B`, left/right battery
 >   via `0xF2`, and `1/2/3→ANC`, `4→WIND`, `5→TRANSPARENCY`, `6→OFF`)
+> - **FitBuds Turbo** — Contributor device verification in
+>   [PR #62](https://github.com/silverpoetry/HyperEars/pull/62): plaintext payloads, `0xF2` left/right
+>   battery, `0x1B` four-mode control and `0x08/0x09` game mode. Case readings remain unverified.
 > - **Other Edifier models (W820NB, W830NB, STAX, etc.)** — Based on BES/Edifier family protocol
 >   speculation, **not yet verified on real hardware**. The same SPP UUID, channel 1, XOR 0xA5
 >   encryption, and D0/CC/D8 commands are shared across the family, but individual firmware versions
@@ -46,12 +49,12 @@ Older firmware may use `0xCC`. Example: `BB EC D0 00 01 99 11` (battery response
 | APP_CODE | 1 byte | `0xEC` (236) for app commands |
 | CMD_INDEX | 1 byte | Command identifier (see below) |
 | LENGTH | 2 bytes | Big-endian, payload length (not including header/CRC) |
-| PAYLOAD | N bytes | **Both send and receive payloads are XOR-encrypted with `0xA5`** |
-| CRC | 1 byte | Sum of all preceding bytes & 0xFF (computed over encrypted payload) |
+| PAYLOAD | N bytes | XOR `0xA5` by default; plaintext on FitBuds Turbo |
+| CRC | 1 byte | Sum of all preceding wire bytes & 0xFF |
 
 ### Payload Encryption (XOR 0xA5, confirmed)
 
-Both directions carry XOR-`0xA5`-encrypted payloads. Key source:
+The default dialect carries XOR-`0xA5` payloads in both directions. Key source:
 `ECCommand.EncryptionCode.Encryption10.value` = `Opcodes.IF_ACMPEQ` = 165 = `0xA5`.
 
 - Battery response: `0x99 ^ 0xA5 = 0x3C = 60%`
@@ -117,7 +120,7 @@ ANC slot or battery query.
 |---|---|
 | ANC slot | `0x1B` |
 | Battery source | `0xF2` device-state response |
-| Battery topology exposed by HyperEars | One aggregate value mirrored to left/right; case unknown |
+| Battery topology exposed by HyperEars | Independent left/right values; case unknown |
 | Noise values | `1/2/3=ANC`, `4=WIND`, `5=TRANSPARENCY`, `6=OFF` |
 
 Captured ANC state:
@@ -131,16 +134,54 @@ Captured device state:
 
 ```text
 BB EC F2 00 06 A6 C1 C7 A5 A6 B4 CC
-                 └─ first payload byte A6 XOR A5 = 03 → aggregate battery 3%
+                 └─ payload XOR A5 = 03 64 62 00 03 11
+                                      └─ └─ left 100%, right 98%
 ```
 
-The remaining `0xF2` payload bytes are retained as unknown. HyperEars does not claim separate
-left, right or case telemetry from this frame. A wind-noise write uses value `4`, for example:
+The leading `03` is frame metadata, not a 3% battery value. This interpretation is corroborated by
+the same real-device session reporting full left/right batteries. HyperEars exposes bytes 1 and 2
+as left and right levels. The remaining `0xF2` fields stay unclaimed until charging and case
+semantics are independently captured; the case therefore remains unavailable. A wind-noise write
+uses value `4`, for example:
 
 ```text
 AA EC C1 00 02 BE A1 B8
                  └─ plaintext 1B 04
 ```
+
+## FitBuds Turbo plaintext dialect
+
+The exact normalized names `edifierfitbudsturbo` and `fitbudsturbo` select this candidate. It uses
+the shared BES RFCOMM endpoints with plaintext responses and writes (`plaintextPayloads=true`).
+Other adapters retain the XOR dialect. The contributor supplied these complete frames in PR #62:
+
+```text
+BB EC CC 00 02 1B 06 96                 mode slot 0x1B, OFF
+BB EC F2 00 06 03 64 64 00 03 11 7E     left/right 100%, case offline
+AA EC C1 00 02 1B 01 75                 set ANC
+```
+
+Only the observed `0x1B` dialect is accepted: `1/2/3=ANC`, `4=WIND`, `5=TRANSPARENCY`, `6=OFF`.
+Game query `0x08` and write `0x09` use a single plaintext Boolean byte (`0` or `1`). A valid
+game response cannot unlock noise controls, and noise confirmation does not wait for game state.
+Noise writes publish their target after successful transport write and request one read-only
+`0xCC` correction. Game writes wait for device state and request `0x08` readback.
+
+FitClip Ultra and Turbo share model-owned game-state reset and typed control contracts. Turbo
+reuses the native game card when only game state is known, then uses native three-state ANC with
+independently visible wind/game options after noise confirmation. The shared card host restores
+the original title, items and layout on unbind. Contributor protocol verification and subsequent
+maintenance-layout verification are tracked separately in the PR.
+
+## Unavailable TWS batteries
+
+The shared `0xF2` parser maps left/right zero values to unavailable (`null`), following the
+single-ear report supplied in [PR #61](https://github.com/silverpoetry/HyperEars/pull/61).
+Each ear field must first decode to `0..100`; out-of-range fields invalidate the report.
+A valid report with both ears unavailable is still a complete snapshot: it clears stale ear
+levels and retains any readable case level. An offline case clears the old case reading too.
+Aggregate `0xD0` and online case levels retain genuine zero percent values. The protocol-test
+display uses a dash for missing readings and includes readable case telemetry.
 
 ## Other Key Commands (confirmed live)
 
@@ -168,10 +209,14 @@ AA EC C1 00 02 BE A1 B8
 4. CRC = sum of all preceding bytes & 0xFF — confirmed
 5. W860NB PRO uses slot `0x10` with values 1=depth, 2=comfort, 3=wind, 4=ambient, 5=off
 6. Evo Pro uses slot `0x1B` with values 1/2/3=ANC, 4=wind, 5=ambient, 6=off
-7. **Send payloads are also XOR-0xA5-encrypted** (not just responses)
+7. Default send and response payloads use XOR `0xA5`; FitBuds Turbo explicitly uses plaintext
 8. The W860NB PRO executes ANC writes immediately; HyperEars skips the readback
    round-trip to keep control latency low
 9. Family candidates start with no private battery or noise-control capability. A valid battery
    response opens private battery; a valid ANC state response records that device's returned
    supported dialect and only then opens writable noise modes. A D8 function reply confirms the
    BES transport but does not by itself claim battery or ANC support.
+10. The stock MiLink card keeps its native transparency, ANC and off controls. After four-mode
+    evidence is confirmed, HyperEars exposes WIND as a switch beside that native section. The same
+    CardAdapter recognizes both the original ANC row and HyperOS 4's select-card row; the switch is
+    rendered from authoritative Adapter state and keeps no duplicate UI state.

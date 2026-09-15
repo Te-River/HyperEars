@@ -152,12 +152,6 @@ class HonorX5sSppCodecTest {
         assertEquals(100, report.rightPercent)
         assertEquals(71, report.casePercent)
 
-        val at = HonorX5sSppCodec.parseHuaweiBattery(
-            "AT+HUAWEIBATTERY=6,2,0,3,0,4,100,5,0,6,71,7,0",
-        )!!
-        assertEquals(null, at.leftPercent)
-        assertEquals(100, at.rightPercent)
-        assertEquals(71, at.casePercent)
     }
 
     @Test
@@ -236,12 +230,9 @@ class HonorX5sSppCodecTest {
     }
 
     @Test
-    fun heartbeatAndUnknownFrames() {
+    fun heartbeatFramesAreRecognized() {
         assertTrue(HonorX5sSppCodec.isHeartbeat(hex("5A 00 05 00 2B 79 01 00 45 E0")))
         assertFalse(HonorX5sSppCodec.isHeartbeat(hex("5A 00 07 00 2B 04 01 02 01 00 E1 1C")))
-        assertTrue(HonorX5sSppCodec.isKnownFrame(hex("5A 00 05 00 2B 79 01 00 45 E0")))
-        assertTrue(HonorX5sSppCodec.isKnownFrame(hex("5A 00 10 00 01 27 01 01 47 02 03 64 64 47 03 03 64 64 00 EF 9F")))
-        assertFalse(HonorX5sSppCodec.isKnownFrame(hex("5A 00 09 00 01 3A 01 10 02 0E 03 04 00 00 00 03 04")))
     }
 
     @Test

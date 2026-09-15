@@ -13,6 +13,7 @@ import dev.hyperears.protocol.oppo.OppoWireCodec
 open class OppoEarbudAdapter : StandardEarbudAdapter() {
     override val id: String = ID
     override val displayName: String = "OPPO Enco headset"
+    override val resolution: AdapterResolution = AdapterResolution.FAMILY_MATCH
     override val controlApps: List<ControlAppSpec> = listOf(
         ControlAppCatalog.heyMelody,
         ControlAppCatalog.oplusWirelessEarphones,
@@ -21,8 +22,6 @@ open class OppoEarbudAdapter : StandardEarbudAdapter() {
     override val privateProtocolRequired: Boolean = true
     override val transportReadiness: TransportReadiness =
         TransportReadiness.PROTOCOL_HANDSHAKE
-    override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
-    override val capabilities: EarbudCapabilities = super.capabilities.copy(battery = false)
     override val supportedNoiseModes: Set<NoiseMode> = emptySet()
     override val transports: List<EarbudTransportSpec> = listOf(
         RfcommEndpointSpec.ServiceUuid(
@@ -47,26 +46,13 @@ open class OppoEarbudAdapter : StandardEarbudAdapter() {
     }
 }
 
-/** Exact retail models whose OPPO noise mapping is documented. */
-abstract class OppoVerifiedEarbudAdapter : OppoEarbudAdapter() {
-    final override val capabilities: EarbudCapabilities = super.capabilities.copy(
-        battery = true,
-        noiseControl = true,
-    )
-    final override val supportedNoiseModes: Set<NoiseMode> = OPPO_NOISE_MODES
+/** Exact retail models whose documented OPPO wire mapping may be probed safely. */
+abstract class OppoModelEarbudAdapter : OppoEarbudAdapter() {
     final override val resolution: AdapterResolution = AdapterResolution.EXACT_MATCH
-
-    private companion object {
-        val OPPO_NOISE_MODES = setOf(
-            NoiseMode.ANC,
-            NoiseMode.OFF,
-            NoiseMode.TRANSPARENCY,
-        )
-    }
 }
 
 /** OPPO Enco Air2 Pro reverses the family's standard ANC and off values. */
-class OppoEncoAir2ProAdapter : OppoVerifiedEarbudAdapter() {
+class OppoEncoAir2ProAdapter : OppoModelEarbudAdapter() {
 
     override val id: String = ID
     override val displayName: String = "OPPO Enco Air2 Pro"
@@ -80,7 +66,7 @@ class OppoEncoAir2ProAdapter : OppoVerifiedEarbudAdapter() {
 }
 
 /** Named configuration reserved for Free4's documented adaptive/spatial extensions. */
-class OppoEncoFree4Adapter : OppoVerifiedEarbudAdapter() {
+class OppoEncoFree4Adapter : OppoModelEarbudAdapter() {
 
     override val id: String = ID
     override val displayName: String = "OPPO Enco Free4"
@@ -93,7 +79,7 @@ class OppoEncoFree4Adapter : OppoVerifiedEarbudAdapter() {
 }
 
 /** Named configuration reserved for Enco X3's documented spatial-audio extensions. */
-class OppoEncoX3Adapter : OppoVerifiedEarbudAdapter() {
+class OppoEncoX3Adapter : OppoModelEarbudAdapter() {
 
     override val id: String = ID
     override val displayName: String = "OPPO Enco X3"
@@ -106,7 +92,7 @@ class OppoEncoX3Adapter : OppoVerifiedEarbudAdapter() {
 }
 
 /** Named configuration reserved for Enco Air5's documented spatial-sound extensions. */
-class OppoEncoAir5Adapter : OppoVerifiedEarbudAdapter() {
+class OppoEncoAir5Adapter : OppoModelEarbudAdapter() {
 
     override val id: String = ID
     override val displayName: String = "OPPO Enco Air5"
@@ -179,12 +165,6 @@ private class OppoProtocolSession(
                         .takeIf(ByteArray::isNotEmpty)
                         ?.let(OppoWireCodec::registerNotifications)
                     handshakePublished = true
-                    add(
-                        ProtocolEvent.CapabilitiesIdentified(
-                            battery = true,
-                            noiseModes = OPPO_NOISE_MODES,
-                        ),
-                    )
                     add(ProtocolEvent.HandshakeAccepted)
                     return@buildList
                 }

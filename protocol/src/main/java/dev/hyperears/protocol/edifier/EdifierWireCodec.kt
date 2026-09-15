@@ -10,7 +10,8 @@ package dev.hyperears.protocol.edifier
  * - Receive: [0xBB][APP_CODE][CMD_INDEX][LEN_H][LEN_L][PAYLOAD...][CRC8]  (older: 0xCC)
  *
  * CRC: sum of all preceding bytes & 0xFF (verified: AA+EC+D8+00+00 = 0x26E -> &0xFF = 0x6E)
- * Payloads in both directions use XOR `0xA5`. ANC set plaintext is [ancIndex][ancValue].
+ * Payloads normally use XOR `0xA5`; the adapter selects plaintext for verified variants.
+ * ANC set plaintext is [ancIndex][ancValue].
  */
 object EdifierWireCodec {
     const val SEND_HEADER = 0xAA
@@ -34,6 +35,7 @@ object EdifierWireCodec {
     const val CMD_NAME_QUERY = 0xC9           // 201 — query name
     const val CMD_FUNCTION_QUERY = 0xD8       // 216 — query device capabilities
     const val CMD_GAME_STATE_QUERY = 0x08     // 8   — query game mode
+    const val CMD_GAME_STATE_SET = 0x09       // 9   — set game mode
 
     // ANC ancIndex for W860NB PRO (ANC16 slot, verified on device)
     const val ANC_INDEX = 0x10
@@ -54,9 +56,25 @@ object EdifierWireCodec {
         val bytes: ByteArray,
     )
 
-    data class BatteryState(
-        val wholeUnit: Int?,
-    )
+    sealed interface BatteryState {
+        /** One authoritative pack level, used by the legacy `0xD0` response. */
+        data class Aggregate(
+            val percent: Int,
+        ) : BatteryState
+
+        /**
+         * Component levels carried by the TWS `0xF2` device-state response.
+         *
+         * Zero-valued ear fields denote unavailable components. A complete snapshot with both
+         * ears unavailable still carries case telemetry and clears previously observed ear levels.
+         */
+        data class TwsComponents(
+            val leftPercent: Int?,
+            val rightPercent: Int?,
+            val casePercent: Int? = null,
+            val caseCharging: Boolean = false,
+        ) : BatteryState
+    }
 
     data class AncState(
         val mode: Int,
@@ -70,45 +88,110 @@ object EdifierWireCodec {
     val queryDeviceState: ByteArray = packet(CMD_DEVICE_STATE_QUERY)
     val queryFunction: ByteArray = packet(CMD_FUNCTION_QUERY)
     val queryVersion: ByteArray = packet(CMD_VERSION_QUERY)
+    val queryGameState: ByteArray = packet(CMD_GAME_STATE_QUERY)
 
-    fun setAnc(ancValue: Int, ancIndex: Int = ANC_INDEX): ByteArray =
+    fun setAnc(ancValue: Int, ancIndex: Int = ANC_INDEX, encrypt: Boolean = true): ByteArray =
         packet(
             CMD_ANC_SET,
             byteArrayOf(ancIndex.toByte(), ancValue.toByte()),
-            xorKey = RESPONSE_XOR_KEY,
+            xorKey = if (encrypt) RESPONSE_XOR_KEY else 0,
+        )
+
+    /** Game mode: payload is a single byte 1=on / 0=off, XOR-encrypted like ANC. */
+    fun setGameMode(enabled: Boolean, encrypt: Boolean = true): ByteArray =
+        packet(
+            CMD_GAME_STATE_SET,
+            byteArrayOf(if (enabled) 0x01 else 0x00),
+            xorKey = if (encrypt) RESPONSE_XOR_KEY else 0,
         )
 
     // ── Parsing ──
 
-    /**
-     * Parse a battery response. Response payload is XOR-encrypted with [RESPONSE_XOR_KEY].
-     * Verified: `BB EC D0 00 01 99 11` -> payload[0]=0x99 -> 0x99^0xA5 = 0x3C = 60%.
-     */
-    fun parseBatteryState(frame: Frame): BatteryState? {
+    /** Parses command-specific battery telemetry. Set [encrypted] = false for plaintext-payload devices. */
+    fun parseBatteryState(frame: Frame, encrypted: Boolean = true): BatteryState? {
         if (!isProtocolResponse(frame)) return null
-        if (frame.commandIndex != CMD_BATTERY_QUERY && frame.commandIndex != CMD_DEVICE_STATE_QUERY) {
-            return null
+        return when (frame.commandIndex) {
+            // Verified: BB EC D0 00 01 99 11 -> 99 xor A5 = 3C = 60%.
+            CMD_BATTERY_QUERY -> frame.payload
+                .singleOrNull()
+                ?.let { if (encrypted) it.decryptPercent() else it.unsigned().takeIf { p -> p in 0..100 } }
+                ?.let { BatteryState.Aggregate(it) }
+
+            // Captured Evo Pro response:
+            // BB EC F2 00 06 A6 C1 C7 A5 A6 B4 CC
+            // decrypted payload: 03 64 62 00 03 11. Byte 0 is metadata; bytes 1/2 are the
+            // independently displayed left/right levels; byte 3 is charge-case percent and
+            // byte 4 is the case state (1=charging, 2=not, 3=offline).
+            CMD_DEVICE_STATE_QUERY -> frame.payload
+                .takeIf { it.size >= TWS_COMPONENT_FIELD_COUNT }
+                ?.let { payload ->
+                    // Validate before mapping zero to unavailable: an invalid byte is not a
+                    // disconnected ear, and must not overwrite the previous valid snapshot.
+                    val left = batteryByte(payload, TWS_LEFT_BATTERY_OFFSET, encrypted) ?: return@let null
+                    val right = batteryByte(payload, TWS_RIGHT_BATTERY_OFFSET, encrypted) ?: return@let null
+                    val caseState = payload.getOrNull(TWS_CASE_STATE_OFFSET)?.unsigned()
+                        ?.let { if (encrypted) it xor RESPONSE_XOR_KEY else it }
+                    // Verified on-device (FitClip Ultra): byte3 = case percent, byte4 = case
+                    // state (1=charging, 2=not, 3=offline). Case omitted when state is offline.
+                    val casePercent = when (caseState) {
+                        TWS_CASE_STATE_CHARGING,
+                        TWS_CASE_STATE_NOT_CHARGING,
+                        -> batteryByte(payload, TWS_CASE_BATTERY_OFFSET, encrypted)
+
+                        TWS_CASE_STATE_OFFLINE -> null
+                        else -> null
+                    }
+                    BatteryState.TwsComponents(
+                        leftPercent = left.percentOrNull(),
+                        rightPercent = right.percentOrNull(),
+                        casePercent = casePercent,
+                        caseCharging = caseState == TWS_CASE_STATE_CHARGING,
+                    )
+                }
+
+            else -> null
         }
-        if (frame.payload.isEmpty()) return null
-        val whole = (frame.payload[0].unsigned() xor RESPONSE_XOR_KEY)
-        if (whole !in 0..100) return null
-        return BatteryState(wholeUnit = whole)
     }
 
+    private fun batteryByte(payload: ByteArray, offset: Int, encrypted: Boolean): Int? =
+        payload.getOrNull(offset)?.unsigned()?.let { value ->
+            if (encrypted) value xor RESPONSE_XOR_KEY else value
+        }?.takeIf { it in 0..100 }
+
     /**
-     * Parse an ANC response. Response payload is XOR-encrypted with [RESPONSE_XOR_KEY].
+     * Parse an ANC response. Response payload is XOR-encrypted with [RESPONSE_XOR_KEY] on
+     * most devices.
      * Verified: `BB EC CC 00 02 B5 A0 CA` -> payload=[0xB5,0xA0] -> XOR 0xA5 = [0x10, 0x05]
      * -> ancIndex=16, ancValue=5 (NC off).
+     *
+     * Some devices (e.g. FitBuds Turbo) answer the ANC query with a **plaintext** payload
+     * (`[ancIndex][ancValue]` directly, e.g. `1B 06`). Set [encrypted] = false for those so the
+     * payload is read verbatim instead of being mangled by the XOR transform.
      */
-    fun parseAncState(frame: Frame): AncState? {
+    fun parseAncState(frame: Frame, encrypted: Boolean = true): AncState? {
         if (!isProtocolResponse(frame)) return null
         if (frame.commandIndex != CMD_ANC_QUERY && frame.commandIndex != CMD_ANC_SET) {
             return null
         }
         if (frame.payload.isEmpty()) return null
-        val mode = (frame.payload[0].unsigned() xor RESPONSE_XOR_KEY)
-        val level = frame.payload.getOrNull(1)?.unsigned()?.let { it xor RESPONSE_XOR_KEY }
+        val mode = frame.payload[0].unsigned().let { if (encrypted) it xor RESPONSE_XOR_KEY else it }
+        val level = frame.payload.getOrNull(1)?.unsigned()?.let { if (encrypted) it xor RESPONSE_XOR_KEY else it }
         return AncState(mode = mode, level = level)
+    }
+
+    /** Parses game-mode state from a 0x08 query or 0x09 set response (1=on, 0=off). */
+    fun parseGameModeState(frame: Frame, encrypted: Boolean = true): Boolean? {
+        if (!isProtocolResponse(frame)) return null
+        if (frame.commandIndex != CMD_GAME_STATE_QUERY && frame.commandIndex != CMD_GAME_STATE_SET) {
+            return null
+        }
+        val value = frame.payload.singleOrNull()?.unsigned()
+            ?.let { if (encrypted) it xor RESPONSE_XOR_KEY else it } ?: return null
+        return when (value) {
+            0 -> false
+            1 -> true
+            else -> null
+        }
     }
 
     /** A device-originated BES/Edifier frame eligible to establish protocol evidence. */
@@ -246,4 +329,21 @@ object EdifierWireCodec {
         joinToString(" ") { "%02X".format(it.unsigned()) }
 
     private fun Byte.unsigned(): Int = toInt() and 0xFF
+
+    private fun Byte.decryptPercent(): Int? =
+        (unsigned() xor RESPONSE_XOR_KEY).takeIf { it in 0..100 }
+
+    /** TWS component level: 0 means that earbud is not connected, so map it to null (unknown). */
+    private fun Int.percentOrNull(): Int? = takeIf { it in 1..100 }
+
+    private const val TWS_COMPONENT_FIELD_COUNT = 3
+    private const val TWS_LEFT_BATTERY_OFFSET = 1
+    private const val TWS_RIGHT_BATTERY_OFFSET = 2
+    private const val TWS_CASE_BATTERY_OFFSET = 3
+    private const val TWS_CASE_STATE_OFFSET = 4
+
+    // BoxStateEnum: 1=Charging, 2=NotCharging, 3=Offline(undetectable).
+    private const val TWS_CASE_STATE_CHARGING = 1
+    private const val TWS_CASE_STATE_NOT_CHARGING = 2
+    private const val TWS_CASE_STATE_OFFLINE = 3
 }

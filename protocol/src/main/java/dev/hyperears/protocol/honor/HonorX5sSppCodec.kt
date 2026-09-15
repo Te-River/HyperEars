@@ -125,13 +125,6 @@ object HonorX5sSppCodec {
         }
     }
 
-    /** True for any frame the session knows how to consume (heartbeat, battery, state). */
-    fun isKnownFrame(bytes: ByteArray): Boolean =
-        isHeartbeat(bytes) || parseBatteryFrame(bytes) != null || stateFromFrame(bytes) != null
-
-    fun isHuaweiBattery(line: String): Boolean =
-        line.trim().startsWith(AT_PREFIX)
-
     /**
      * Decodes an SPP battery report frame
      * `5A 00 10 00 01 27/08 01 01 <case> 02 03 <left> <right> <case> 03 03 <left> <right> 00 <crc>`.
@@ -156,37 +149,6 @@ object HonorX5sSppCodec {
         if (left == null && right == null && case == null) return null
         // Trailing flag byte is 0x01 while the case is charging and 0x00 otherwise.
         return BatteryState(left, right, case, caseCharging = bytes[CHARGING_FLAG_OFFSET] == 0x01.toByte())
-    }
-
-    /**
-     * Vendor HFP AT battery reference (`AT+HUAWEIBATTERY`), kept as protocol material. The
-     * first release sources component battery from the SPP reports above.
-     */
-    fun parseHuaweiBattery(line: String): BatteryState? {
-        val trimmed = line.trim()
-        if (!trimmed.startsWith(AT_PREFIX)) return null
-        val tokens = trimmed.removePrefix(AT_PREFIX).split(',')
-        if (tokens.firstOrNull()?.toIntOrNull() == null) return null
-        val pairs = tokens.drop(1)
-        if (pairs.size % 2 != 0) return null
-
-        var left: Int? = null
-        var right: Int? = null
-        var case: Int? = null
-        pairs.chunked(2).forEach { (indexToken, valueToken) ->
-            val index = indexToken.toIntOrNull() ?: return@forEach
-            val value = valueToken.toIntOrNull() ?: return@forEach
-            if (value !in 0..100) return@forEach
-            // A zero percent means that component is not connected.
-            val percent = value.takeIf { it > 0 }
-            when (index) {
-                INDEX_LEFT -> left = percent
-                INDEX_RIGHT -> right = percent
-                INDEX_CASE -> case = percent
-            }
-        }
-        if (left == null && right == null && case == null) return null
-        return BatteryState(left, right, case)
     }
 
     /**
@@ -254,10 +216,6 @@ object HonorX5sSppCodec {
         }
     }
 
-    private const val AT_PREFIX = "AT+HUAWEIBATTERY="
-    private const val INDEX_LEFT = 2
-    private const val INDEX_RIGHT = 4
-    private const val INDEX_CASE = 6
     private const val STATE_FRAME_SIZE = 12
     private const val STATE_FRAME_PREFIX_SIZE = 8
     private const val STATE_FRAME_X_OFFSET = 8

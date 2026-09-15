@@ -12,14 +12,15 @@ import dev.hyperears.protocol.edifier.EdifierWireCodec
 open class EdifierEarbudAdapter : StandardEarbudAdapter() {
     override val id: String = ID
     override val displayName: String = "Edifier headset"
+    override val resolution: AdapterResolution = AdapterResolution.FAMILY_MATCH
     override val controlApps: List<ControlAppSpec> = listOf(ControlAppCatalog.edifierConnect)
     override val privateProtocolRequired: Boolean = true
     override val transportReadiness: TransportReadiness =
         TransportReadiness.PROTOCOL_HANDSHAKE
-    override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
-    override val capabilities: EarbudCapabilities = super.capabilities.copy(battery = false)
-    override val miLinkCardPresentationId: MiLinkCardPresentationId =
-        EdifierMiLinkPresentationIds.FOUR_MODE
+    override val miLinkCardPresentationId: MiLinkCardPresentationId?
+        get() = EdifierMiLinkPresentationIds.FOUR_MODE.takeIf {
+            effectiveCapabilities().windNoiseControl
+        }
     protected open val wireConfig: EdifierWireConfig = EdifierWireConfig(
         batteryProjection = EdifierBatteryProjection.TWS_AGGREGATE,
     )
@@ -110,19 +111,7 @@ class EdifierW860NBProAdapter : EdifierHeadphonesAdapter() {
     override val wireConfig: EdifierWireConfig = EdifierWireConfig(
         batteryQueries = listOf(EdifierBatteryQuery.BATTERY),
         ancDialects = listOf(EdifierAncDialects.W860_NB_PRO),
-        preverifiedAncIndex = EdifierAncDialects.W860_NB_PRO.index,
-    )
-    override val capabilities: EarbudCapabilities = EarbudCapabilities(
-        battery = true,
-        noiseControl = true,
-        windNoiseControl = true,
-        audioHandoff = true,
-    )
-    override val supportedNoiseModes: Set<NoiseMode> = setOf(
-        NoiseMode.ANC,
-        NoiseMode.TRANSPARENCY,
-        NoiseMode.WIND,
-        NoiseMode.OFF,
+        preferredAncIndex = EdifierAncDialects.W860_NB_PRO.index,
     )
     /**
      * The W860NB PRO plays a voice prompt for ~1.9 s after an ANC switch and ignores commands
@@ -153,7 +142,7 @@ class EdifierW860NBProAdapter : EdifierHeadphonesAdapter() {
  * Concrete model adapter for Edifier 花再 Evo Pro.
  *
  * Contributor captures confirm the shared BES framing, an independent ANC slot (`0x1B`), the
- * six-value noise-mode dialect, and aggregate TWS battery telemetry delivered by command `0xF2`.
+ * six-value noise-mode dialect, and component TWS battery telemetry delivered by command `0xF2`.
  */
 class EdifierEvoProAdapter : EdifierEarbudAdapter() {
     override val id: String = ID
@@ -163,16 +152,8 @@ class EdifierEvoProAdapter : EdifierEarbudAdapter() {
         batteryQueries = listOf(EdifierBatteryQuery.DEVICE_STATE),
         batteryProjection = EdifierBatteryProjection.TWS_AGGREGATE,
         ancDialects = listOf(EdifierAncDialects.EVO_PRO),
-        preverifiedAncIndex = EdifierAncDialects.EVO_PRO.index,
+        preferredAncIndex = EdifierAncDialects.EVO_PRO.index,
     )
-    override val capabilities: EarbudCapabilities = EarbudCapabilities(
-        battery = true,
-        noiseControl = true,
-        windNoiseControl = true,
-        audioHandoff = true,
-    )
-    override val supportedNoiseModes: Set<NoiseMode> =
-        EdifierAncDialects.EVO_PRO.supportedModes
     override fun controlPolicy(request: ControlRequest): ControlExecutionPolicy =
         super.controlPolicy(request).let { policy ->
             if (request is StandardControlRequest.SetNoiseMode) {
@@ -191,8 +172,54 @@ class EdifierEvoProAdapter : EdifierEarbudAdapter() {
     }
 }
 
+/**
+ * Concrete model adapter for Edifier FitClip Ultra.
+ *
+ * FitClip Ultra is an open-ear clip TWS. Live on-device probing (RFCOMM to the shared Edifier
+ * BES SPP service `EDF00000-...`) confirms:
+ *
+ *  - Battery is delivered by the TWS device-state command `0xF2` as independent left/right
+ *    levels (the legacy aggregate battery command `0xD0` is not answered).
+ *  - The device has no ANC: the `0xCC` ANC-state query is not answered and the headset drops
+ *    the RFCOMM channel when probed. The adapter therefore disables ANC discovery entirely so
+ *    the handshake never emits `0xCC`.
+ */
+class EdifierFitClipUltraAdapter : EdifierGameModeAdapter() {
+    override val id: String = ID
+    override val displayName: String = "Edifier FitClip Ultra"
+    override val resolution: AdapterResolution = AdapterResolution.EXACT_MATCH
+    override val miLinkCardPresentationId: MiLinkCardPresentationId?
+        get() = EdifierMiLinkPresentationIds.GAME_MODE.takeIf {
+            runtimeState().features.get<EdifierGameModeFeatureState>() != null
+        }
+    override val wireConfig: EdifierWireConfig = EdifierWireConfig(
+        batteryQueries = listOf(EdifierBatteryQuery.DEVICE_STATE),
+        batteryProjection = EdifierBatteryProjection.TWS_AGGREGATE,
+        ancDialects = emptyList(),
+        gameModeQuery = true,
+    )
+
+    override fun matches(identity: EarbudIdentity): Boolean {
+        if (!identity.standardHeadset || identity.nativeSystemEarbud) return false
+        return normalizeDeviceName(identity.deviceName.orEmpty()) in MODEL_NAMES
+    }
+
+    companion object {
+        const val ID = "edifier-fitclip-ultra"
+
+        private val MODEL_NAMES = setOf(
+            "edifierfitclipultra",
+            "fitclipultra",
+        )
+    }
+}
+
 object EdifierMiLinkPresentationIds {
     val FOUR_MODE = MiLinkCardPresentationId("edifier-four-mode")
+    val GAME_MODE = MiLinkCardPresentationId("edifier-fitclip-game")
+
+    /** Native ANC with independently confirmed wind and game options. */
+    val FITBUDS_TURBO = MiLinkCardPresentationId("edifier-fitbuds-turbo")
 }
 
 enum class EdifierBatteryQuery(val commandIndex: Int) {
@@ -204,7 +231,7 @@ enum class EdifierBatteryProjection {
     /** Headphones and other single-pack devices expose one authoritative battery value. */
     OVERALL,
 
-    /** TWS devices expose one aggregate value, mirrored into MiLink's left/right slots. */
+    /** Legacy TWS aggregate values are mirrored only when the wire response is aggregate. */
     TWS_AGGREGATE,
 }
 
@@ -269,12 +296,17 @@ data class EdifierWireConfig(
         EdifierAncDialects.W860_NB_PRO,
         EdifierAncDialects.EVO_PRO,
     ),
-    val preverifiedAncIndex: Int? = null,
+    val preferredAncIndex: Int? = null,
+    val gameModeQuery: Boolean = false,
+    /** PR #62 confirms plaintext responses and writes for FitBuds Turbo; other models use XOR. */
+    val plaintextPayloads: Boolean = false,
+    /** One read-only mode query after a write, for models whose response is not a full state. */
+    val noiseModeReadback: Boolean = false,
 ) {
     init {
         require(batteryQueries.isNotEmpty())
         require(ancDialects.map(EdifierAncDialect::index).distinct().size == ancDialects.size)
-        require(preverifiedAncIndex == null || ancDialects.any { it.index == preverifiedAncIndex })
+        require(preferredAncIndex == null || ancDialects.any { it.index == preferredAncIndex })
     }
 
     fun dialect(index: Int): EdifierAncDialect? = ancDialects.firstOrNull { it.index == index }
@@ -292,28 +324,49 @@ private class EdifierProtocolSession(
     private val decoder = EdifierWireCodec.Decoder()
     private var handshakePublished = false
     private var activeAncDialect: EdifierAncDialect? =
-        configuration.preverifiedAncIndex?.let(configuration::dialect)
+        configuration.preferredAncIndex?.let(configuration::dialect)
+
+    /** True when this device requires the XOR 0xA5 obfuscation on responses and set commands. */
+    private val encryptPayloads: Boolean get() = !configuration.plaintextPayloads
 
     override fun initialReadCommands(): List<ByteArray> = buildList {
         addAll(configuration.batteryQueries.map { batteryQueryPacket(it) })
-        add(EdifierWireCodec.queryAnc)
+        if (configuration.ancDialects.isNotEmpty()) {
+            add(EdifierWireCodec.queryAnc)
+        }
         add(EdifierWireCodec.queryFunction)
+        if (configuration.gameModeQuery) {
+            add(EdifierWireCodec.queryGameState)
+        }
     }
 
     override fun encode(request: ControlRequest): List<ByteArray> = when {
         request === StandardControlRequest.Refresh -> buildList {
             addAll(configuration.batteryQueries.map { batteryQueryPacket(it) })
-            add(EdifierWireCodec.queryAnc)
+            if (configuration.ancDialects.isNotEmpty()) {
+                add(EdifierWireCodec.queryAnc)
+            }
+            if (configuration.gameModeQuery) {
+                add(EdifierWireCodec.queryGameState)
+            }
         }
         request is StandardControlRequest.SetNoiseMode -> {
             val dialect = activeAncDialect
             val ancValue = dialect?.writeValues?.get(request.mode)
             if (ancValue != null) {
-                listOf(EdifierWireCodec.setAnc(ancValue = ancValue, ancIndex = dialect.index))
+                listOf(
+                    EdifierWireCodec.setAnc(
+                        ancValue = ancValue,
+                        ancIndex = dialect.index,
+                        encrypt = encryptPayloads,
+                    ),
+                )
             } else {
                 emptyList()
             }
         }
+        request is EdifierControlRequest.SetGameMode ->
+            listOf(EdifierWireCodec.setGameMode(request.enabled, encrypt = encryptPayloads))
 
         else -> emptyList()
     }
@@ -322,8 +375,21 @@ private class EdifierProtocolSession(
         // The W860NB PRO executes ANC writes immediately and reports state via the write
         // acknowledgement. Skip the extra readback round-trip to reduce perceived latency.
         request === StandardControlRequest.Refresh -> emptyList()
-        request is StandardControlRequest.SetNoiseMode -> emptyList()
+        request is StandardControlRequest.SetNoiseMode ->
+            listOf(EdifierWireCodec.queryAnc).takeIf { configuration.noiseModeReadback }.orEmpty()
+        request is EdifierControlRequest.SetGameMode -> listOf(EdifierWireCodec.queryGameState)
         else -> emptyList()
+    }
+
+    override fun query(request: TelemetryQuery): List<ByteArray> = when (request) {
+        TelemetryQuery.RefreshAll -> encode(StandardControlRequest.Refresh)
+        is TelemetryQuery.RefreshFeature -> when (request.featureId) {
+            EdifierGameModeFeatureState.FEATURE_ID ->
+                listOf(EdifierWireCodec.queryGameState).takeIf {
+                    configuration.gameModeQuery
+                }.orEmpty()
+            else -> emptyList()
+        }
     }
 
     override fun offer(bytes: ByteArray): List<ProtocolEvent> = buildList {
@@ -331,25 +397,20 @@ private class EdifierProtocolSession(
             val acceptsBatteryCommand = configuration.batteryQueries.any {
                 it.commandIndex == frame.commandIndex
             }
-            EdifierWireCodec.parseBatteryState(frame)
+            EdifierWireCodec.parseBatteryState(frame, encrypted = encryptPayloads)
                 ?.takeIf { acceptsBatteryCommand }
                 ?.let { battery ->
-                add(ProtocolEvent.CapabilitiesIdentified(battery = true))
-                val reading = BatteryReading(battery.wholeUnit, charging = false)
-                add(
-                    ProtocolEvent.FeatureStateChanged(
-                        BatteryFeatureState(when (configuration.batteryProjection) {
-                            EdifierBatteryProjection.OVERALL -> EarbudBattery(overall = reading)
-                            EdifierBatteryProjection.TWS_AGGREGATE ->
-                                EarbudBattery.fromAggregate(battery.wholeUnit)
-                        }),
-                    ),
-                )
-                publishHandshakeIfNeeded()
-                return@forEach
-            }
+                    add(ProtocolEvent.CapabilitiesIdentified(battery = true))
+                    add(
+                        ProtocolEvent.FeatureStateChanged(
+                            BatteryFeatureState(battery.toDomainBattery()),
+                        ),
+                    )
+                    publishHandshakeIfNeeded()
+                    return@forEach
+                }
 
-            EdifierWireCodec.parseAncState(frame)?.let { anc ->
+            EdifierWireCodec.parseAncState(frame, encrypted = encryptPayloads)?.let { anc ->
                 val dialect = configuration.dialect(anc.mode) ?: return@let
                 activeAncDialect = dialect
                 val mode = anc.level?.let(dialect.readValues::get)
@@ -377,6 +438,19 @@ private class EdifierProtocolSession(
                 return@forEach
             }
 
+            // Game-mode state from 0x08 query or 0x09 set response
+            EdifierWireCodec.parseGameModeState(frame, encrypted = encryptPayloads)
+                ?.takeIf { configuration.gameModeQuery }
+                ?.let { enabled ->
+                    add(
+                        ProtocolEvent.FeatureStateChanged(
+                            EdifierGameModeFeatureState(enabled),
+                        ),
+                    )
+                    publishHandshakeIfNeeded()
+                    return@forEach
+                }
+
             add(
                 ProtocolEvent.UnknownFrame(
                     version = 0,
@@ -391,13 +465,28 @@ private class EdifierProtocolSession(
     override fun reset() {
         decoder.reset()
         handshakePublished = false
-        activeAncDialect = configuration.preverifiedAncIndex?.let(configuration::dialect)
+        activeAncDialect = configuration.preferredAncIndex?.let(configuration::dialect)
     }
 
     private fun MutableList<ProtocolEvent>.publishHandshakeIfNeeded() {
         if (handshakePublished) return
         handshakePublished = true
         add(ProtocolEvent.HandshakeAccepted)
+    }
+
+    private fun EdifierWireCodec.BatteryState.toDomainBattery(): EarbudBattery = when (this) {
+        is EdifierWireCodec.BatteryState.Aggregate -> when (configuration.batteryProjection) {
+            EdifierBatteryProjection.OVERALL -> EarbudBattery(
+                overall = BatteryReading(percent, charging = false),
+            )
+            EdifierBatteryProjection.TWS_AGGREGATE -> EarbudBattery.fromAggregate(percent)
+        }
+
+        is EdifierWireCodec.BatteryState.TwsComponents -> EarbudBattery(
+            left = BatteryReading(leftPercent, charging = false),
+            right = BatteryReading(rightPercent, charging = false),
+            case = BatteryReading(casePercent, charging = caseCharging),
+        )
     }
 
     private companion object {

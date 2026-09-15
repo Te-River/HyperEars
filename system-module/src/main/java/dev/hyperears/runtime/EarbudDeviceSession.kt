@@ -15,6 +15,7 @@ import dev.hyperears.integration.ControlOwnership
 import dev.hyperears.integration.BatterySource
 import dev.hyperears.integration.BatteryFeatureState
 import dev.hyperears.integration.AdapterActivation
+import dev.hyperears.integration.AdapterEffect
 import dev.hyperears.integration.AdapterIoResult
 import dev.hyperears.integration.AdapterRuntimeState
 import dev.hyperears.integration.AdapterSnapshot
@@ -85,6 +86,8 @@ internal class EarbudDeviceSession(
     private val transactionMutex = Mutex()
     private val unknownFrameLogTimes = mutableMapOf<Int, Long>()
     private val controlPacingLock = Any()
+    private val refreshRequestGate = RefreshRequestGate(REFRESH_COALESCE_MS)
+    private val stateRequests = StateRequestDispatcher(scope)
     private var lastControlAt = Long.MIN_VALUE
 
     @Volatile
@@ -206,6 +209,12 @@ internal class EarbudDeviceSession(
         reconcileExternalControlOwner()
     }
 
+    /** Updates policy used by family Adapters for protocol-identified replacements. */
+    fun updateDisabledAdapterIds(adapterIds: Set<String>) {
+        if (closed.get()) return
+        adapter.configureDisabledAdapterIds(adapterIds)
+    }
+
     private fun reconcileExternalControlOwner() {
         val nextOwner = if (externalControlEnabled) {
             ControlAppCatalog.activeOwner(adapter.controlApps, activeControlAppPackages)
@@ -269,6 +278,13 @@ internal class EarbudDeviceSession(
 
     fun execute(request: ControlRequest): Boolean {
         if (closed.get()) return false
+        if (request === StandardControlRequest.Refresh && !refreshRequestGate.tryAcquire()) {
+            ModuleLog.debug(
+                COMPONENT,
+                "coalesced duplicate state refresh address=${maskBluetoothAddress(address)}",
+            )
+            return true
+        }
         if (externalControlApp != null) {
             if (request === StandardControlRequest.Refresh) publishSnapshot()
             return request === StandardControlRequest.Refresh
@@ -293,10 +309,15 @@ internal class EarbudDeviceSession(
                         gapMs = COMMAND_GAP_MS,
                         description = request.description(),
                     )
+                    applyAdapterEffects(
+                        activeChannel = activeChannel,
+                        expectedAdapter = adapter,
+                        effects = adapter.controlWritten(request),
+                    )
                     if (result.stateChanged) publishSnapshot()
                     val readback = result.readback
                     if (readback.isNotEmpty()) {
-                        delay(CONTROL_READBACK_DELAY_MS)
+                        delay(policy.readbackDelayMs)
                         sendCommands(
                             activeChannel = activeChannel,
                             commands = readback,
@@ -321,6 +342,7 @@ internal class EarbudDeviceSession(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        stateRequests.cancelAll("device session closed")
         val activeChannel = synchronized(transportLock) {
             channel.also {
                 channel = null
@@ -502,7 +524,8 @@ internal class EarbudDeviceSession(
                 lastError = error
                 ModuleLog.debug(
                     COMPONENT,
-                    "transport ${transport.id} failed: ${error.javaClass.simpleName}",
+                    "transport ${transport.id} failed: " +
+                        "${error.javaClass.simpleName}:${error.message ?: "<no-message>"}",
                 )
             }
         }
@@ -511,13 +534,16 @@ internal class EarbudDeviceSession(
 
     private suspend fun awaitAcceptedHandshake(
         candidate: EarbudChannel,
-    ) = withTimeout(PROTOCOL_HANDSHAKE_TIMEOUT_MS) {
+    ) = candidate.withIoDeadline(
+        timeoutMs = PROTOCOL_HANDSHAKE_TIMEOUT_MS,
+        operation = "protocol handshake",
+    ) {
         val buffer = ByteArray(READ_BUFFER_SIZE)
         while (true) {
-            val count = candidate.read(buffer)
+            val count = read(buffer)
             if (count < 0) throw IOException("vendor channel ended before protocol handshake")
             offerAdapterBytes(candidate, buffer.copyOf(count))
-            if (lifecycle.protocolReady) return@withTimeout
+            if (lifecycle.protocolReady) return@withIoDeadline
         }
     }
 
@@ -536,7 +562,11 @@ internal class EarbudDeviceSession(
         activeChannel: EarbudChannel,
         bytes: ByteArray,
     ): AdapterIoResult = transactionMutex.withLock {
-        val result = adapter.receive(bytes)
+        ModuleLog.debug(COMPONENT) {
+            "received endpoint=${activeChannel.endpointId} bytes=${bytes.toHex()}"
+        }
+        val receivingAdapter = adapter
+        val result = receivingAdapter.receive(bytes)
         if (result.commands.isNotEmpty()) {
             sendCommands(
                 activeChannel = activeChannel,
@@ -609,6 +639,13 @@ internal class EarbudDeviceSession(
 
             HandshakeResult.AwaitingEvidence, null -> Unit
         }
+        if (adapter === receivingAdapter) {
+            applyAdapterEffects(
+                activeChannel = activeChannel,
+                expectedAdapter = receivingAdapter,
+                effects = result.effects,
+            )
+        }
         if (publishRequired) publishSnapshot()
         result
     }
@@ -618,8 +655,7 @@ internal class EarbudDeviceSession(
         activeChannel: EarbudChannel,
     ) {
         if (channel !== activeChannel) throw CancellationException("stale adapter replacement")
-        val previous = adapter
-        replacement.adapter.adoptRuntimeState(previous.runtimeState())
+        stateRequests.cancelAll("adapter replaced")
         adapter = replacement.adapter
         ControlAppCatalog.activeOwner(adapter.controlApps, activeControlAppPackages)
             ?.takeIf { externalControlEnabled }
@@ -639,7 +675,7 @@ internal class EarbudDeviceSession(
     private fun applyInitialProtocolFallback(): Boolean {
         if (privateProtocolEverConfirmed) return false
         val previous = adapter
-        val fallback = when (val resolution = previous.onInitialProtocolUnavailable()) {
+        val fallback = when (val resolution = previous.resolveInitialProtocolFailure()) {
             InitialProtocolFailureResolution.KeepDormant -> return false
             is InitialProtocolFailureResolution.FallbackTo -> resolution.adapter
         }
@@ -725,11 +761,80 @@ internal class EarbudDeviceSession(
         }
     }
 
+    /** Executes ordered Adapter effects while retaining all timer and transport ownership. */
+    private fun applyAdapterEffects(
+        activeChannel: EarbudChannel,
+        expectedAdapter: EarbudAdapter,
+        effects: List<AdapterEffect>,
+    ) {
+        effects.forEach { effect ->
+            when (effect) {
+                is AdapterEffect.RequestState -> {
+                    stateRequests.request(
+                        featureId = effect.featureId,
+                        delayMs = effect.delayMs,
+                        task = {
+                            transactionMutex.withLock {
+                                currentCoroutineContext().ensureActive()
+                                if (
+                                    closed.get() ||
+                                    externalControlApp != null ||
+                                    channel !== activeChannel ||
+                                    adapter !== expectedAdapter
+                                ) {
+                                    return@withLock
+                                }
+                                val commands = expectedAdapter.queryState(effect.featureId)
+                                if (commands.isEmpty()) {
+                                    ModuleLog.debug(
+                                        COMPONENT,
+                                        "state request produced no command feature=${effect.featureId}",
+                                    )
+                                    return@withLock
+                                }
+                                sendCommands(
+                                    activeChannel = activeChannel,
+                                    commands = commands,
+                                    gapMs = COMMAND_GAP_MS,
+                                    description = "state request ${effect.featureId}",
+                                )
+                            }
+                        },
+                        onFailure = { error ->
+                            ModuleLog.warn(
+                                COMPONENT,
+                                "state request failed feature=${effect.featureId}",
+                                error,
+                            )
+                            activeChannel.close()
+                        },
+                    )
+                    ModuleLog.debug(
+                        COMPONENT,
+                        "state request scheduled feature=${effect.featureId} " +
+                            "delay=${effect.delayMs}ms",
+                    )
+                }
+
+                is AdapterEffect.CancelStateRequest -> {
+                    stateRequests.cancel(
+                        featureId = effect.featureId,
+                        reason = "adapter accepted state report",
+                    )
+                }
+            }
+        }
+    }
+
     private fun clearTransport() {
+        stateRequests.cancelAll("vendor channel cleared")
         val oldChannel = synchronized(transportLock) {
             channel.also {
                 channel = null
                 adapter.resetProtocolSession()
+                if (adapter.effectiveBatterySource() == BatterySource.SYSTEM_AGGREGATE) {
+                    adapter.onSystemBatteryChanged(systemBatteryPercent)
+                }
             }
         }
         oldChannel?.close()
@@ -840,9 +945,9 @@ internal class EarbudDeviceSession(
         const val PROTOCOL_HANDSHAKE_TIMEOUT_MS = 2_500L
         const val INITIAL_COMMAND_GAP_MS = 150L
         const val COMMAND_GAP_MS = 120L
-        const val CONTROL_READBACK_DELAY_MS = 120L
         const val STABLE_CONNECTION_MS = 30_000L
         const val UNKNOWN_FRAME_LOG_INTERVAL_MS = 5 * 60_000L
+        const val REFRESH_COALESCE_MS = 1_500L
         const val READ_BUFFER_SIZE = 1_024
     }
 }

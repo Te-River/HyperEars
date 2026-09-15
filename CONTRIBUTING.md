@@ -6,7 +6,7 @@
 ## 开发环境
 
 - JDK 17；
-- Android SDK 36；
+- Android SDK 37；
 - Git；
 - 用于实机验证的 Android 15+ HyperOS 设备和 LSPosed API 101+。
 
@@ -29,9 +29,11 @@ node tools/validate-docs.mjs
 ## 设计规则
 
 1. 设备匹配按“具体型号 → 厂商家族 → 标准耳机”从窄到宽执行。
-2. Adapter 声明身份、能力、端点和型号差异配置；ProtocolSession 只处理一个设备会话的帧状态。
+2. Adapter 声明候选身份、端点、型号差异配置和会话内已确认能力；ProtocolSession 只处理
+   一个设备会话的帧状态。
 3. WireCodec 不创建连接、不访问 Android Context、不修改 UI。
-4. 未经证据验证的命令不得暴露为用户可操作能力。
+4. 名称、服务 UUID、设备形态和具体型号配置只允许选择候选协议。初始匹配 Adapter 不得
+   静态开放私有电量源、噪声模式或专用卡片；对应合法状态响应到达后才允许逐项开放。
 5. 原生系统耳机必须留在官方路径。
 6. 优先 Hook 稳定的语义边界；避免按混淆方法名、视图层级或定时轮询打补丁。
 7. 新增后台工作必须说明生命周期、退避、并发和耗电影响。
@@ -44,6 +46,11 @@ node tools/validate-docs.mjs
 11. 动态设备状态必须使用 `DeviceFeatureState` 子类型和 Adapter 的 `featureStateContract`；
     不得向 `EarbudState`、`AdapterRuntimeState`、Intent extra 或公共枚举增加型号专属字段。
     协议身份、能力证据和连接生命周期保持为独立模型。
+12. 协议状态观测默认由 Adapter 立即接受。若实测证明某型号存在连接初期暂态值，Adapter
+    必须通过 `FeatureReportDecision.HOLD` 暂缓提交，并在事件作用域中声明有界的
+    `requestState(featureId, delayMs)`；达到接受条件时声明 `cancelStateRequest(featureId)`。
+    Android 会话只机械执行有序 `AdapterEffect`，不得保存型号目标、重试次数或接受策略；
+    WireCodec、ProtocolSession、MiLink Hook 和 UI 中不得按型号休眠或建立常驻轮询。
 
 新增或变更厂商控制 App 时，还必须同步更新 `ControlAppCatalog`、对应 Adapter 的
 `controlApps`、`META-INF/xposed/scope.list` 和
@@ -76,6 +83,19 @@ node tools/validate-docs.mjs
 `BC:87:FA:00:00:01` 可以表达厂商 OUI，而不公开个人设备标识。
 
 ## 代码与提交
+
+### 维护分支与实机复核
+
+设备适配 PR 需要维护者整理时，保留原作者提交，在独立维护分支中修订并提供签名验证包。
+改变了协议、生命周期或卡片行为的维护版须获得针对最终维护提交的实机复核，才可合入主线并
+关闭原 PR。等待期间维护 PR 保持 Draft，原 PR 保持开放，不提前添加自动关闭原 PR 的关键字。
+原版实测、单元测试、CI 和签名构建分别记录，不能代替维护版实机复核。
+
+维护记录：2026-09-07，#72 在共享卡片布局尚未得到实机复核时提前合入，并自动关闭 #62。
+2026-09-08 维护者决定保留这次合入，不回退代码和 PR 状态；该决定仅适用于本次事件，
+后续仍须执行上述复核流程。FitBuds Turbo 的维护版布局继续标记为待复核。
+
+### 提交要求
 
 - Kotlin/Java 使用 4 空格，Markdown/YAML 使用 2 空格，统一 LF；
 - 公共协议常量说明来源和语义，不只记录十六进制值；

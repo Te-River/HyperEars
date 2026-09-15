@@ -13,7 +13,9 @@ import androidx.lifecycle.viewModelScope
 import dev.hyperears.protocol.bose.BoseBmapWireCodec
 import dev.hyperears.protocol.bose.BoseProductCatalog
 import dev.hyperears.protocol.edifier.EdifierWireCodec
+import dev.hyperears.protocol.rose.RoseBudsFeelMk2WireCodec
 import dev.hyperears.protocol.starring.StarRingWireCodec
+import dev.hyperears.protocol.technics.TechnicsRaceWireCodec
 import dev.hyperears.protocol.vivo.VivoTwsProtocol
 import dev.hyperears.protocol.vivo.VivoTwsProtocol.NoiseMode
 import dev.hyperears.protocol.vivo.VivoTwsProtocol.WireConfig
@@ -119,6 +121,8 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
     private val starRingDecoder = StarRingWireCodec.Decoder()
     private val boseDecoder = BoseBmapWireCodec.Decoder()
     private val edifierDecoder = EdifierWireCodec.Decoder()
+    private val roseBudsFeelDecoder = RoseBudsFeelMk2WireCodec.Decoder()
+    private val technicsDecoder = TechnicsRaceWireCodec.Decoder()
     private val mutableState = MutableStateFlow(ProtocolUiState())
     val state: StateFlow<ProtocolUiState> = mutableState.asStateFlow()
     private val logId = AtomicLong()
@@ -276,6 +280,7 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
             starRingDecoder.reset()
             boseDecoder.reset()
             edifierDecoder.reset()
+            technicsDecoder.reset()
             val target = mutableState.value.selectedTarget
             mutableState.value = mutableState.value.copy(
                 phase = ConnectionPhase.CONNECTING,
@@ -377,6 +382,30 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
                     delay(PROBE_GAP_MS)
                     send(EdifierWireCodec.queryFunction, "Edifier 查询设备功能")
                 }
+                ProtocolTarget.ROSE_BUDSFEEL -> {
+                    mutableState.value = mutableState.value.copy(
+                        handshakeStatus = "等待响应",
+                        noiseApiStatus = "等待响应",
+                        batteryApiStatus = "等待响应",
+                    )
+                    send(RoseBudsFeelMk2WireCodec.queryStatus(0), "BudsFeel 状态查询")
+                    delay(PROBE_GAP_MS)
+                    send(RoseBudsFeelMk2WireCodec.queryStatus(1), "BudsFeel 状态查询（重试）")
+                }
+                ProtocolTarget.TECHNICS_RACE -> {
+                    mutableState.value = mutableState.value.copy(
+                        handshakeStatus = "等待协议响应",
+                        noiseApiStatus = "等待响应",
+                        batteryApiStatus = "等待响应",
+                    )
+                    send(TechnicsRaceWireCodec.queryAgentBattery, "Technics 查询右耳电量（Agent）")
+                    delay(PROBE_GAP_MS)
+                    send(TechnicsRaceWireCodec.queryClientBattery, "Technics 查询左耳电量（Client）")
+                    delay(PROBE_GAP_MS)
+                    send(TechnicsRaceWireCodec.queryCaseBattery, "Technics 查询充电盒电量")
+                    delay(PROBE_GAP_MS)
+                    send(TechnicsRaceWireCodec.queryOutsideControl, "Technics 查询外部控制状态")
+                }
             }
             markTimeoutsLater()
         }
@@ -440,6 +469,17 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
 
                 ProtocolTarget.EDIFIER_BES ->
                     send(EdifierWireCodec.queryBattery, "Edifier 查询电量")
+
+                ProtocolTarget.ROSE_BUDSFEEL ->
+                    send(RoseBudsFeelMk2WireCodec.queryStatus(0), "BudsFeel 状态查询")
+
+                ProtocolTarget.TECHNICS_RACE -> {
+                    send(TechnicsRaceWireCodec.queryAgentBattery, "Technics 查询右耳电量（Agent）")
+                    delay(PROBE_GAP_MS)
+                    send(TechnicsRaceWireCodec.queryClientBattery, "Technics 查询左耳电量（Client）")
+                    delay(PROBE_GAP_MS)
+                    send(TechnicsRaceWireCodec.queryCaseBattery, "Technics 查询充电盒电量")
+                }
             }
             markTimeoutsLater()
         }
@@ -477,6 +517,10 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
     fun sendRaw() {
         viewModelScope.launch {
             if (!ensureConnected()) return@launch
+            if (mutableState.value.selectedTarget == ProtocolTarget.TECHNICS_RACE) {
+                addLog("ERR", "Technics 实验目标仅允许只读探测")
+                return@launch
+            }
             val raw = parseHex(mutableState.value.rawCommand)
             if (raw == null || raw.isEmpty()) {
                 addLog("ERR", "原始命令不是有效的十六进制字节")
@@ -610,6 +654,8 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
             ProtocolTarget.STARRING_ULTRA -> handleStarRingIncoming(bytes)
             ProtocolTarget.BOSE_BMAP -> handleBoseIncoming(bytes)
             ProtocolTarget.EDIFIER_BES -> handleEdifierIncoming(bytes)
+            ProtocolTarget.ROSE_BUDSFEEL -> handleRoseBudsFeelIncoming(bytes)
+            ProtocolTarget.TECHNICS_RACE -> handleTechnicsIncoming(bytes)
         }
     }
 
@@ -738,15 +784,34 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
                 EdifierWireCodec.run { frame.bytes.hex() },
             )
             EdifierWireCodec.parseBatteryState(frame)?.let { battery ->
+                val observation: BatteryObservation
+                val summary: String
+                when (battery) {
+                    is EdifierWireCodec.BatteryState.Aggregate -> {
+                        observation = BatteryObservation(
+                            leftPercent = battery.percent,
+                            rightPercent = battery.percent,
+                            casePercent = null,
+                        )
+                        summary = "整机=${battery.percent}%"
+                    }
+
+                    is EdifierWireCodec.BatteryState.TwsComponents -> {
+                        observation = BatteryObservation(
+                            leftPercent = battery.leftPercent,
+                            rightPercent = battery.rightPercent,
+                            casePercent = battery.casePercent,
+                        )
+                        summary = "左=${battery.leftPercent?.let { "$it%" } ?: "—"} " +
+                            "右=${battery.rightPercent?.let { "$it%" } ?: "—"} " +
+                            "盒=${battery.casePercent?.let { "$it%" } ?: "—"}"
+                    }
+                }
                 mutableState.value = mutableState.value.copy(
-                    battery = BatteryObservation(
-                        leftPercent = battery.wholeUnit,
-                        rightPercent = battery.wholeUnit,
-                        casePercent = null,
-                    ),
+                    battery = observation,
                     batteryApiStatus = "可用 · Edifier 响应",
                 )
-                addLog("BAT", "电量=${battery.wholeUnit ?: "—"}%")
+                addLog("BAT", summary)
             }
             EdifierWireCodec.parseAncState(frame)?.let { anc ->
                 val modeLabel = when (anc.mode) {
@@ -771,6 +836,100 @@ internal class ProtocolTestViewModel(application: Application) : AndroidViewMode
                     handshakeStatus = "可用 · D8 功能响应 ${frame.payload.size} 字节",
                 )
                 addLog("FUNC", "设备功能响应: ${frame.payload.size} 字节", EdifierWireCodec.run { frame.payload.hex() })
+            }
+        }
+    }
+
+    private fun handleRoseBudsFeelIncoming(bytes: ByteArray) {
+        roseBudsFeelDecoder.offer(bytes).forEach { state ->
+            when (state) {
+                is RoseBudsFeelMk2WireCodec.State.Battery -> {
+                    mutableState.value = mutableState.value.copy(
+                        battery = BatteryObservation(
+                            leftPercent = state.leftPercent,
+                            rightPercent = state.rightPercent,
+                            casePercent = state.casePercent,
+                        ),
+                        batteryApiStatus = "可用 · BudsFeel 响应",
+                    )
+                    addLog(
+                        "BAT",
+                        "左耳=${state.leftPercent ?: "—"}% 右耳=${state.rightPercent ?: "—"}% " +
+                            "充电盒=${state.casePercent ?: "—"}%",
+                    )
+                }
+
+                is RoseBudsFeelMk2WireCodec.State.Noise -> {
+                    val modeLabel = when (state.mode) {
+                        RoseBudsFeelMk2WireCodec.NoiseMode.ANC -> "降噪"
+                        RoseBudsFeelMk2WireCodec.NoiseMode.ADAPTIVE_ANC -> "自适应降噪"
+                        RoseBudsFeelMk2WireCodec.NoiseMode.EXTREME_ANC -> "极致降噪"
+                        RoseBudsFeelMk2WireCodec.NoiseMode.OFF -> "关闭"
+                        RoseBudsFeelMk2WireCodec.NoiseMode.TRANSPARENCY -> "通透"
+                        RoseBudsFeelMk2WireCodec.NoiseMode.WIND -> "抗风噪"
+                    }
+                    mutableState.value = mutableState.value.copy(
+                        noiseApiStatus = "可用 · $modeLabel",
+                    )
+                    addLog("ANC", "噪声模式=$modeLabel (value=${state.mode.value})")
+                }
+            }
+        }
+    }
+
+    private fun handleTechnicsIncoming(bytes: ByteArray) {
+        technicsDecoder.offer(bytes).forEach { frame ->
+            addLog(
+                "FRAME",
+                "Technics RACE type=${frame.type.name} id=0x${frame.raceId.hex4()} " +
+                    "payload=${frame.payload.size}",
+                frame.bytes.hexBytes(),
+            )
+            var recognized = false
+            TechnicsRaceWireCodec.parseBattery(frame)?.let { reading ->
+                recognized = true
+                val current = mutableState.value.battery
+                    ?: BatteryObservation(null, null, null)
+                val battery = when (reading.component) {
+                    TechnicsRaceWireCodec.BatteryComponent.LEFT ->
+                        current.copy(leftPercent = reading.percent)
+
+                    TechnicsRaceWireCodec.BatteryComponent.RIGHT ->
+                        current.copy(rightPercent = reading.percent)
+
+                    TechnicsRaceWireCodec.BatteryComponent.CASE ->
+                        current.copy(casePercent = reading.percent)
+                }
+                mutableState.value = mutableState.value.copy(
+                    battery = battery,
+                    batteryApiStatus = "可用 · Technics RACE 响应",
+                )
+                addLog(
+                    "BAT",
+                    "左=${battery.leftPercent ?: "—"}% 右=${battery.rightPercent ?: "—"}% " +
+                        "盒=${battery.casePercent ?: "—"}%",
+                )
+            }
+            TechnicsRaceWireCodec.parseOutsideControl(frame)?.let { outside ->
+                recognized = true
+                val mode = when (outside.mode) {
+                    TechnicsRaceWireCodec.OutsideControlMode.OFF -> "关闭"
+                    TechnicsRaceWireCodec.OutsideControlMode.ANC -> "降噪"
+                    TechnicsRaceWireCodec.OutsideControlMode.TRANSPARENCY -> "通透"
+                }
+                mutableState.value = mutableState.value.copy(
+                    noiseApiStatus = "可用 · $mode",
+                )
+                addLog(
+                    "ANC",
+                    "外部控制=$mode 降噪等级=${outside.noiseCancelLevel} " +
+                        "通透等级=${outside.ambientLevel}",
+                )
+            }
+            if (recognized) {
+                mutableState.value = mutableState.value.copy(
+                    handshakeStatus = "可用 · Technics RACE 响应",
+                )
             }
         }
     }

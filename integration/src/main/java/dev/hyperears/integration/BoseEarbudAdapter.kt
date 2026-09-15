@@ -16,6 +16,7 @@ open class BoseEarbudAdapter(
 ) : StandardEarbudAdapter(transferredSession, initialRuntimeState) {
     override val id: String = ID
     override val displayName: String = "Bose BMAP headset"
+    override val resolution: AdapterResolution = AdapterResolution.FAMILY_MATCH
     override val controlApps: List<ControlAppSpec> = listOf(
         ControlAppCatalog.bose,
         ControlAppCatalog.boseConnect,
@@ -23,8 +24,6 @@ open class BoseEarbudAdapter(
     override val privateProtocolRequired: Boolean = true
     override val transportReadiness: TransportReadiness =
         TransportReadiness.PROTOCOL_HANDSHAKE
-    override val batterySource: BatterySource = BatterySource.PRIVATE_PROTOCOL
-    override val capabilities: EarbudCapabilities = super.capabilities.copy(battery = false)
     override val transports: List<EarbudTransportSpec> = listOf(
         RfcommEndpointSpec.Channel(number = 8),
         RfcommEndpointSpec.ServiceUuid(
@@ -61,13 +60,15 @@ open class BoseEarbudAdapter(
 
     override fun onProductIdentified(productId: Int): HandshakeResult? {
         if (wireConfig?.productId == productId) return null
+        val identifiedConfig = BoseBmapModelRegistry.find(productId) ?: return null
+        if (!isAdapterEnabled(identifiedConfig.modelId)) return null
         val session = protocolSession as? BoseBmapProtocolSession ?: return null
         val next = BoseRuntimeAdapterFactory.create(
             productId = productId,
             protocolSession = session,
             runtimeState = runtimeState(),
         ) ?: return null
-        return HandshakeResult.Replace(next, AdapterActivation.KEEP_CHANNEL_READY)
+        return selectReplacement(next, AdapterActivation.KEEP_CHANNEL_READY)
     }
 
     override fun onCapabilitiesIdentified(
@@ -94,7 +95,7 @@ open class BoseEarbudAdapter(
             protocolSession = session,
             runtimeState = runtimeState(),
         )
-        return HandshakeResult.Replace(next, AdapterActivation.KEEP_CHANNEL_READY)
+        return selectReplacement(next, AdapterActivation.KEEP_CHANNEL_READY)
     }
 
     companion object {
@@ -218,6 +219,7 @@ abstract class BoseBmapModelAdapter(
         noiseControl = supportedNoiseModes.isNotEmpty(),
         windNoiseControl = NoiseMode.WIND in supportedNoiseModes,
     )
+    final override val resolution: AdapterResolution = AdapterResolution.PROTOCOL_CONFIRMED
 
     /** Concrete Bose models are selected by BMAP product ID, never by a mutable display name. */
     final override fun matches(identity: EarbudIdentity): Boolean = false
@@ -243,6 +245,7 @@ abstract class BoseBmapHeadphonesModelAdapter(
         noiseControl = supportedNoiseModes.isNotEmpty(),
         windNoiseControl = NoiseMode.WIND in supportedNoiseModes,
     )
+    final override val resolution: AdapterResolution = AdapterResolution.PROTOCOL_CONFIRMED
 
     /** Concrete Bose models are selected by BMAP product ID, never by a mutable display name. */
     final override fun matches(identity: EarbudIdentity): Boolean = false

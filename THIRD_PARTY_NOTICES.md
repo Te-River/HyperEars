@@ -99,8 +99,11 @@ NiceHCK_Controller 及可互操作协议事实独立完成。
   <https://github.com/Star-ZER0/Pods-Protocol-Reverse-Engineering>
 - Upstream license: CC BY-SA 4.0
 
-用于交叉验证 vivo、OPPO 等厂商协议字段。相关文档在引用处保留来源链接；HyperEars
-自身抓包和实机结果会明确标注为本项目验证。
+用于交叉验证 vivo、OPPO 等厂商协议字段，并提供 MOONDROP Robin / 水月雨知更鸟的
+SPP 握手、电量查询与三态噪声控制协议事实。Robin 参考固定提交：
+<https://github.com/Star-ZER0/Pods-Protocol-Reverse-Engineering/blob/2d97d85b2cde9ee1446e9e7f67c222ac9b9f2bb9/handmade/MOONDROP-Protocol.txt>。
+相关文档在引用处保留来源链接；HyperEars 根据互操作协议事实独立实现 WireCodec 与
+ProtocolSession，不复制上游程序、厂商资源或应用代码。上游文档采用 CC BY-SA 4.0。
 
 ## ScrewVivoTWS
 
@@ -129,6 +132,15 @@ v8.4.39 的互操作行为分析，并由真实设备通信验证。花再 Evo P
 厂商应用、反编译产物、图片或品牌资源；其他 Edifier 型号只在合法 BES 响应确认相应
 能力后开放。
 
+FitClip Ultra 的游戏模式、盒电量与单耳零值报告由 aodianjun 在
+[PR #54](https://github.com/silverpoetry/HyperEars/pull/54)、
+[PR #59](https://github.com/silverpoetry/HyperEars/pull/59) 和
+[PR #61](https://github.com/silverpoetry/HyperEars/pull/61) 中提供；FitBuds Turbo 的明文 BES
+负载、`0x1B` 模式及游戏控制由 sksnnjj 在
+[PR #62](https://github.com/silverpoetry/HyperEars/pull/62) 中提供（原提交
+`6bd1312947c4f831197ba5129fbe9368adaeebf3`）。原作者提交保留在维护分支历史中，后续按本项目
+GPL-3.0-only 许可整理状态生命周期、能力门禁与共享卡片实现。
+
 ## Sony Headphones protocol research
 
 - Plutoberth/SonyHeadphonesClient:
@@ -145,11 +157,102 @@ v8.4.39 的互操作行为分析，并由真实设备通信验证。花再 Evo P
 Gadgetbridge 的 AGPL 程序代码，也不分发 SonyHeadphonesClient、厂商应用、图片或品牌
 资源。SonyHeadphonesClient 的 MIT 许可文本由其固定提交中的 `LICENSE` 提供。
 
+## QCYpods protocol research
+
+- SouthautumnYa/QCYpods:
+  <https://github.com/SouthautumnYa/QCYpods/tree/7bfbd951ad3fb803be84864a2a8493c78695bd61>
+- Reviewed revision: `7bfbd951ad3fb803be84864a2a8493c78695bd61`
+- Declared license: GNU GPL-3.0（仓库 README 声明；该固定提交未包含独立的许可证文件）
+
+用于核对 QCY `A001/1001/1002` GATT 端点、`0xFF` 命令流、组件电量 `0x2F`、噪声模式
+`0x0C`、厂商数据 `0x521C` 及伴生控制端点关联方式。HyperEars 只实现 MiLink 所需的电量
+与原生三态噪声控制，并在自身 Adapter、ProtocolSession 和 WireCodec 边界内重新组织实现；
+不分发 QCYpods 的应用、界面、图片、品牌资源或构建产物。上游许可证状态按固定提交如实
+记录，具体条款以其仓库声明为准。
+
+## TechincsPods / Technics RACE research
+
+- MartinKayJr/TechincsPods:
+  <https://github.com/MartinKayJr/TechincsPods/tree/a378106659d4a90ed7ac28a4ac94d592bebbec85>
+- Reviewed revision: `a378106659d4a90ed7ac28a4ac94d592bebbec85`
+- Declared license: GPL-3.0（仓库 README 声明；该固定提交未包含独立的许可证文件）
+
+用于核对 Technics EAH-AZ TWS 的 Airoha RACE 帧、RFCOMM UUID、组件电量查询和噪声模式
+写入序列。协议事实以固定提交的当前代码为准，不采用其 README 中英文功能说明或旧协议笔记
+作为当前行为证据。HyperEars 只在自身 WireCodec、ProtocolSession 与 Adapter 边界内实现
+MiLink 所需子集，不分发 TechincsPods 的应用、界面、图片、APK、抓包或厂商品牌资源。
+上游许可证状态按固定提交如实记录，具体条款以其仓库声明为准。
+
+## OpenFreebuds (Huawei protocol research)
+
+- melianmiko/OpenFreebuds: <https://github.com/melianmiko/OpenFreebuds>
+- Reviewed revision: `035bf2a87cdda9e9c8e8e90c662b7fa61270c6ee`
+- Upstream license: GNU GPL-3.0（仓库 `LICENSE` 文件，版权归 MelianMiko）
+
+用于理解华为 FreeBuds Pro 3 的私有 SPP 通道 1 帧格式与 CRC16-XMODEM 校验、电量查询
+（读响应 `[level, mode]` 与写命令 `[mode, level]` 的字节序差异、组件电量与整机充电标志
+语义）、ANC 档位与透传档位枚举、`2B 03` 降噪变更通知等协议事实；共享帧格式和校验规则也
+用于交叉核对 FreeBuds 5i 的独立捕获记录。HyperEars 在自身
+WireCodec、ProtocolSession 与 Adapter 边界内重新组织实现，不复制或分发 OpenFreebuds 的
+程序代码、应用、界面、图片或品牌资源；上游 GPL-3.0 义务以该仓库 `LICENSE` 原文为准。
+
+## Huawei FreeBuds 5i capture evidence (hardware-verified)
+
+FreeBuds 5i 的型号专属证据来自用户提供的 Android `btsnoop_hci` 文件和同步人工时间线，并已由
+HyperEars 端到端实机验证复核。Channel 16、短模式帧和模式值的语义按“抓包确认”或“强推断”分别
+标注，不能证明其他固件或其他型号通用。该材料不包含可再分发的软件代码、厂商资源或独立许可证要求。
+
+## Huawei FreeBuds Pro 3 / 智慧音频
+
+华为 FreeBuds Pro 3 的协议字段语义依据 OpenFreebuds 的公开实现、贡献者实机记录与
+可互操作协议事实；华为智慧音频（`com.huawei.smartaudio`）仅作为控制权边界与导航目标登记在
+`ControlAppCatalog`、`scope.list` 与[控制 App 目录](docs/control-apps.md)中，不作为耳机
+品牌或型号的识别证据。HyperEars 不随 APK 分发华为应用、反编译产物、固件、抓包文件、
+图片或品牌资源；所有商标、产品名称归其各自权利人所有。
+
 ## Android and LSPosed APIs
 
 - Android Open Source Project: <https://source.android.com/>
 - libxposed API: <https://github.com/libxposed/api>
 
+## Miuix
+
+- compose-miuix-ui/miuix: <https://github.com/compose-miuix-ui/miuix>
+- Reviewed release: `v0.9.3` (`c36fab72391801d1e3ea5a00f966bf16bac28d4c`)
+- Version used by HyperEars: `0.9.3`
+- Upstream license: Apache License 2.0
+
+用于提供 Miuix 应用界面、菜单栏背景捕获与模糊能力。应用状态、导航、设置、耳机会话及
+MiLink 集成仍由 HyperEars 自身的共享层维护。
+
+## KernelSU UI reference
+
+- tiann/KernelSU: <https://github.com/tiann/KernelSU/tree/4521784328352c54334beb29e05c74360b60d7cb>
+- Upstream license: GNU GPL-3.0
+
+界面设置的独立页面、实时预览和界面缩放参考 KernelSU Manager。Miuix 悬浮底栏基于上述
+固定提交中的 `FloatingBottomBar`、动画和手势结构适配，统一维护图标、文字、选中胶囊与
+拖动交互。HyperEars 仅接入自身三个顶层页面，未引入 KernelSU 的 Root 管理业务、品牌资源
+或应用状态代码。
+
+## DexKit
+
+The optional MiLink compatibility resolver uses DexKit to locate one verified semantic method
+fingerprint when stable symbols and the exact-version table are unavailable.
+
+- Project: <https://github.com/LuckyPray/DexKit>
+- License used by HyperEars: Apache License 2.0 (selected from the artifact's published
+  Apache-2.0/LGPL-3.0 license metadata)
+- Scope in HyperEars: one bounded, unique-result DEX query during initialization of an otherwise
+  unsupported MiLink build; it is not used by Bluetooth protocol sessions or card interactions.
+
 各依赖的二进制和许可证信息由 Gradle 依赖元数据及其上游项目提供。
+
+## Honor X5s Pro community contribution
+
+荣耀亲选耳机 X5s Pro（BTV-ME10）的 SPP 帧样本、字段映射与实机验证由 Te_River 在
+[PR #23](https://github.com/silverpoetry/HyperEars/pull/23) 提供。HyperEars 在项目现有的
+Adapter、ProtocolSession 与 WireCodec 边界内合并和维护该贡献；不随项目分发厂商应用、
+抓包文件、固件或品牌资源。该贡献合入后的源代码遵循本项目的 GNU GPL-3.0-only 许可。
 
 所有商标、产品名称和厂商应用名称仅用于描述兼容性，归其各自权利人所有。

@@ -8,13 +8,24 @@ import android.content.SharedPreferences
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.net.toUri
 import dev.hyperears.bridge.ModuleContract
 import dev.hyperears.diagnostics.AppDiagnosticLog
 import dev.hyperears.diagnostics.DiagnosticLogExporter
+import dev.hyperears.integration.EarbudState
+import dev.hyperears.integration.ControlOwnership
+import dev.hyperears.integration.NoiseMode
 import dev.hyperears.integration.StandardControlRequest
 import dev.hyperears.root.RootAction
 import dev.hyperears.root.RootActionState
@@ -27,6 +38,10 @@ import dev.hyperears.ui.dashboard.DeviceSessionReducer
 import dev.hyperears.ui.dashboard.DeviceSessionSnapshot
 import dev.hyperears.ui.navigation.HyperEarsApp
 import dev.hyperears.ui.theme.HyperEarsTheme
+import dev.hyperears.ui.theme.UiPreferencesStore
+import dev.hyperears.update.ReleaseInfo
+import dev.hyperears.update.UpdateCheckCoordinator
+import dev.hyperears.update.UpdateCheckPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,10 +55,23 @@ class MainActivity : ComponentActivity() {
     private val miLinkProcesses = MutableStateFlow<Set<String>>(emptySet())
     private val lastUpdatedAtMillis = MutableStateFlow<Long?>(null)
     private val settings = MutableStateFlow(ModuleSettings())
+    private val autoCheckUpdates = MutableStateFlow(true)
     private val rootAvailable = MutableStateFlow<Boolean?>(null)
     private val rootActionState = MutableStateFlow<RootActionState>(RootActionState.Idle)
     private val activityScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val updateCheckPreferences by lazy { UpdateCheckPreferences(this) }
+    private val updateCheckCoordinator by lazy {
+        UpdateCheckCoordinator(
+            preferences = updateCheckPreferences,
+            scope = activityScope,
+            currentVersion = BuildConfig.VERSION_NAME,
+        )
+    }
+    private val uiPreferencesStore by lazy { UiPreferencesStore(this) }
+    private val dashboardRefreshedSessionTokens = mutableSetOf<String>()
     private var remotePreferences: SharedPreferences? = null
+    private var activityStarted = false
+    private var dashboardVisible = false
 
     private val createDiagnosticDocument = registerForActivityResult(
         ActivityResultContracts.CreateDocument("text/plain"),
@@ -70,14 +98,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private val preferenceChangeListener = SharedPreferences.OnSharedPreferenceChangeListener {
-            preferences,
-            _,
-        ->
-        runOnUiThread {
-            settings.value = ModuleSettingsStore.read(preferences)
+    private val preferenceChangeListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { preferences, _ ->
+            runOnUiThread {
+                settings.value = ModuleSettingsStore.read(preferences)
+            }
         }
-    }
 
     private val modulePreferencesListener = object : HyperEarsApplication.PreferencesListener {
         override fun onPreferencesChanged(preferences: SharedPreferences?) {
@@ -99,6 +125,7 @@ class MainActivity : ComponentActivity() {
                                 sessionToken = token,
                             )
                             lastUpdatedAtMillis.value = System.currentTimeMillis()
+                            refreshDashboardSessionIfNeeded(state, token)
                         }
                     }
                     runtimeResponsive.value = true
@@ -128,6 +155,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         settings.value = ModuleSettingsStore.readLocal(this)
+        autoCheckUpdates.value = updateCheckPreferences.automaticChecksEnabled
         registerReceiver(
             receiver,
             IntentFilter().apply {
@@ -138,37 +166,78 @@ class MainActivity : ComponentActivity() {
             Context.RECEIVER_EXPORTED,
         )
         setContent {
-            HyperEarsTheme {
-                val activeSessions = sessionCollection
-                    .collectAsStateWithLifecycle()
-                    .value
-                    .sessions
-                val online = runtimeResponsive.collectAsStateWithLifecycle().value
-                val bridgeProcesses = miLinkProcesses.collectAsStateWithLifecycle().value
-                val updatedAt = lastUpdatedAtMillis.collectAsStateWithLifecycle().value
-                val currentSettings = settings.collectAsStateWithLifecycle().value
-                val hasRoot = rootAvailable.collectAsStateWithLifecycle().value
-                val rootAction = rootActionState.collectAsStateWithLifecycle().value
-
-                HyperEarsApp(
-                    uiState = DashboardUiState(
-                        sessions = activeSessions.values
-                            .sortedBy { it.state.deviceName.orEmpty() },
-                        runtimeResponsive = online,
-                        miLinkProcesses = bridgeProcesses,
-                        lastUpdatedAtMillis = updatedAt,
+            val uiPreferences = uiPreferencesStore.state
+                .collectAsStateWithLifecycle()
+                .value
+            val darkTheme = uiPreferences.themeMode.resolveDark(isSystemInDarkTheme())
+            LaunchedEffect(darkTheme) {
+                val transparent = android.graphics.Color.TRANSPARENT
+                enableEdgeToEdge(
+                    statusBarStyle = SystemBarStyle.auto(
+                        lightScrim = transparent,
+                        darkScrim = transparent,
+                        detectDarkMode = { darkTheme },
                     ),
-                    onRefresh = {
-                        requestRuntimeState()
-                        activeSessions.values.forEach(::sendRefreshControl)
-                    },
-                    settings = currentSettings,
-                    rootAvailable = hasRoot,
-                    rootActionState = rootAction,
-                    onSettingsChanged = ::updateSettings,
-                    onRunRootAction = ::runRootAction,
-                    onExportLogs = ::exportLogs,
+                    navigationBarStyle = SystemBarStyle.auto(
+                        lightScrim = transparent,
+                        darkScrim = transparent,
+                        detectDarkMode = { darkTheme },
+                    ),
                 )
+            }
+            val activeSessions = sessionCollection
+                .collectAsStateWithLifecycle()
+                .value
+                .sessions
+            val online = runtimeResponsive.collectAsStateWithLifecycle().value
+            val bridgeProcesses = miLinkProcesses.collectAsStateWithLifecycle().value
+            val updatedAt = lastUpdatedAtMillis.collectAsStateWithLifecycle().value
+            val currentSettings = settings.collectAsStateWithLifecycle().value
+            val hasRoot = rootAvailable.collectAsStateWithLifecycle().value
+            val rootAction = rootActionState.collectAsStateWithLifecycle().value
+            val updateCheck = updateCheckCoordinator.state
+                .collectAsStateWithLifecycle()
+                .value
+            val automaticUpdates = autoCheckUpdates.collectAsStateWithLifecycle().value
+            val systemDensity = LocalDensity.current
+            val scaledDensity = remember(systemDensity, uiPreferences.interfaceScale) {
+                Density(
+                    density = systemDensity.density * uiPreferences.interfaceScale,
+                    fontScale = systemDensity.fontScale,
+                )
+            }
+            HyperEarsTheme(preferences = uiPreferences) {
+                CompositionLocalProvider(LocalDensity provides scaledDensity) {
+                    HyperEarsApp(
+                        uiState = DashboardUiState(
+                            sessions = activeSessions.values
+                                .sortedBy { it.state.deviceName.orEmpty() },
+                            runtimeResponsive = online,
+                            miLinkProcesses = bridgeProcesses,
+                            lastUpdatedAtMillis = updatedAt,
+                        ),
+                        onRefresh = {
+                            requestRuntimeState()
+                            activeSessions.values.forEach(::sendRefreshControl)
+                        },
+                        onSetNoiseMode = ::sendNoiseModeControl,
+                        onDashboardVisibilityChanged = ::onDashboardVisibilityChanged,
+                        settings = currentSettings,
+                        autoCheckUpdates = automaticUpdates,
+                        rootAvailable = hasRoot,
+                        rootActionState = rootAction,
+                        onSettingsChanged = ::updateSettings,
+                        onAutoCheckUpdatesChanged = ::updateAutoCheckUpdates,
+                        onRunRootAction = ::runRootAction,
+                        onExportLogs = ::exportLogs,
+                        updateCheckState = updateCheck,
+                        onCheckUpdates = updateCheckCoordinator::checkManually,
+                        onDismissUpdate = updateCheckCoordinator::dismissAvailableDialog,
+                        onOpenRelease = ::openRelease,
+                        uiPreferences = uiPreferences,
+                        onUiPreferencesChanged = uiPreferencesStore::update,
+                    )
+                }
             }
         }
         activityScope.launch {
@@ -178,10 +247,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        activityStarted = true
         (application as HyperEarsApplication).addPreferencesListener(modulePreferencesListener)
         runtimeResponsive.value = false
         miLinkProcesses.value = emptySet()
         requestRuntimeState()
+        if (dashboardVisible) beginDashboardRefresh()
+        if (autoCheckUpdates.value) updateCheckCoordinator.checkAutomatically()
     }
 
     override fun onDestroy() {
@@ -203,12 +275,76 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendRefreshControl(session: DeviceSessionSnapshot) {
-        val address = session.state.address ?: return
-        if (!session.state.connected) return
+        sendRefreshControl(session.state, session.sessionToken)
+    }
+
+    private fun sendRefreshControl(
+        state: EarbudState,
+        sessionToken: String,
+    ) {
+        val address = state.address ?: return
+        if (!state.connected) return
         sendBroadcast(
-            ModuleContract.control(StandardControlRequest.Refresh, address, session.sessionToken)
+            ModuleContract.control(StandardControlRequest.Refresh, address, sessionToken)
                 .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
         )
+    }
+
+    private fun sendNoiseModeControl(
+        address: String,
+        sessionToken: String,
+        mode: NoiseMode,
+    ) {
+        val session = sessionCollection.value.sessions.values.firstOrNull { snapshot ->
+            snapshot.sessionToken == sessionToken &&
+                snapshot.state.address.equals(address, ignoreCase = true)
+        } ?: return
+        val state = session.state
+        val adapter = state.adapter ?: return
+        if (
+            !state.connected ||
+            state.lifecycle.controlOwnership != ControlOwnership.MODULE ||
+            !adapter.capabilities.noiseControl ||
+            mode !in adapter.supportedNoiseModes
+        ) {
+            return
+        }
+        sendBroadcast(
+            ModuleContract.control(
+                StandardControlRequest.SetNoiseMode(mode),
+                address,
+                sessionToken,
+            ).addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
+        )
+    }
+
+    private fun onDashboardVisibilityChanged(visible: Boolean) {
+        if (dashboardVisible == visible) return
+        dashboardVisible = visible
+        if (visible && activityStarted) {
+            requestRuntimeState()
+            beginDashboardRefresh()
+        } else if (!visible) {
+            dashboardRefreshedSessionTokens.clear()
+        }
+    }
+
+    private fun beginDashboardRefresh() {
+        dashboardRefreshedSessionTokens.clear()
+        sessionCollection.value.sessions.values.forEach(::refreshDashboardSessionIfNeeded)
+    }
+
+    private fun refreshDashboardSessionIfNeeded(session: DeviceSessionSnapshot) {
+        refreshDashboardSessionIfNeeded(session.state, session.sessionToken)
+    }
+
+    private fun refreshDashboardSessionIfNeeded(
+        state: EarbudState,
+        sessionToken: String,
+    ) {
+        if (!activityStarted || !dashboardVisible || !state.connected) return
+        if (!dashboardRefreshedSessionTokens.add(sessionToken)) return
+        sendRefreshControl(state, sessionToken)
     }
 
     private fun updateSettings(updated: ModuleSettings) {
@@ -228,6 +364,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        activityStarted = false
+        dashboardRefreshedSessionTokens.clear()
         (application as HyperEarsApplication).removePreferencesListener(modulePreferencesListener)
         super.onStop()
     }
@@ -275,6 +413,32 @@ class MainActivity : ComponentActivity() {
         createDiagnosticDocument.launch(DiagnosticLogExporter.defaultFileName())
     }
 
+    private fun updateAutoCheckUpdates(enabled: Boolean) {
+        if (autoCheckUpdates.value == enabled) return
+        updateCheckPreferences.automaticChecksEnabled = enabled
+        autoCheckUpdates.value = enabled
+        if (enabled) updateCheckCoordinator.checkAutomatically()
+        activityScope.launch {
+            AppDiagnosticLog.record(
+                context = this@MainActivity,
+                enabled = settings.value.diagnosticLogging,
+                component = "Settings",
+                message = "autoCheckUpdates=$enabled",
+            )
+        }
+    }
+
+    private fun openRelease(release: ReleaseInfo) {
+        runCatching {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, release.pageUrl.toUri()),
+            )
+        }.onFailure {
+            Toast.makeText(this, "无法打开 Release 页面", Toast.LENGTH_SHORT).show()
+        }
+        updateCheckCoordinator.dismissAvailableDialog()
+    }
+
     private fun recordSettingsChange(
         previous: ModuleSettings,
         updated: ModuleSettings,
@@ -289,14 +453,20 @@ class MainActivity : ComponentActivity() {
                     if (previous.modulePaused != updated.modulePaused) {
                         add("modulePaused=${updated.modulePaused}")
                     }
-                    if (previous.preferVendorControlApp != updated.preferVendorControlApp) {
-                        add("preferVendorControlApp=${updated.preferVendorControlApp}")
+                    if (previous.moreSettingsTarget != updated.moreSettingsTarget) {
+                        add("moreSettingsTarget=${updated.moreSettingsTarget.name}")
                     }
                     if (previous.yieldToVendorControlApp != updated.yieldToVendorControlApp) {
                         add("yieldToVendorControlApp=${updated.yieldToVendorControlApp}")
                     }
                     if (previous.diagnosticLogging != updated.diagnosticLogging) {
                         add("diagnosticLogging=${updated.diagnosticLogging}")
+                    }
+                    if (previous.disabledAdapterIds != updated.disabledAdapterIds) {
+                        add(
+                            "disabledAdapters=" +
+                                updated.disabledAdapterIds.sorted().joinToString(","),
+                        )
                     }
                 }.joinToString(separator = " · "),
             )
